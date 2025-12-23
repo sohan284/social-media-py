@@ -32,6 +32,7 @@ INSTALLED_APPS = [
     'allauth.socialaccount.providers.apple',
 
     'ckeditor',
+    # 'ckeditor_uploader',  # Commented out - not needed
     'drf_yasg',
     'channels',
     'django_filters',
@@ -122,6 +123,10 @@ CORS_ALLOW_CREDENTIALS = True
 
 ROOT_URLCONF = 'app.urls'
 
+# Login URLs
+LOGIN_URL = '/auth/login/'
+LOGIN_REDIRECT_URL = '/swagger/'
+
 # allauth settings
 ACCOUNT_EMAIL_REQUIRED = True
 ACCOUNT_EMAIL_VERIFICATION = 'none'
@@ -154,18 +159,18 @@ import redis
 WSGI_APPLICATION = 'app.wsgi.application'
 ASGI_APPLICATION = 'app.asgi.application'
 
-CHANNEL_LAYERS = {
-    'default': {
-        'BACKEND': 'channels_redis.core.RedisChannelLayer',
-        'CONFIG': {"hosts": [('127.0.0.1', 6379)]},
-    },
-}
-
 # CHANNEL_LAYERS = {
 #     'default': {
-#         'BACKEND': 'channels.layers.InMemoryChannelLayer',
+#         'BACKEND': 'channels_redis.core.RedisChannelLayer',
+#         'CONFIG': {"hosts": [('127.0.0.1', 6379)]},
 #     },
 # }
+
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels.layers.InMemoryChannelLayer',
+    },
+}
 
 
 DATABASES = {

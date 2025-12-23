@@ -26,6 +26,10 @@ class CommunityViewSet(viewsets.ModelViewSet):
         return CommunitySerializer
     
     def get_queryset(self):
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return Community.objects.none()
+        
         user = self.request.user
         
         if self.action == 'list':
@@ -427,6 +431,10 @@ class CommunityJoinRequestViewSet(viewsets.ModelViewSet):
     http_method_names = ['get', 'post', 'patch', 'delete']
     
     def get_queryset(self):
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return CommunityJoinRequest.objects.none()
+        
         user = self.request.user
         community_name = self.request.query_params.get('community')
         

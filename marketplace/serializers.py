@@ -8,8 +8,8 @@ class SubCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = SubCategory
         fields = ['id', 'name', 'category', 'created_at']
-
         read_only_fields = ['id','created_at']
+        ref_name = 'MarketplaceSubCategory'
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -18,8 +18,8 @@ class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
         fields = ['id', 'name', 'subcategories', 'subcategory_count', 'created_at']
-
         read_only_fields = ['id', 'created_at']
+        ref_name = 'MarketplaceCategory'
 
     def get_subcategory_count(self, obj):
         return obj.subcategories.count()

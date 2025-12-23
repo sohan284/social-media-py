@@ -28,6 +28,10 @@ class PostViewSet(viewsets.ModelViewSet):
     parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
 
     def get_queryset(self):
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return Post.objects.none()
+        
         user = self.request.user
         if self.action == 'list':
             return Post.objects.filter(status='approved').order_by('-created_at')
@@ -974,6 +978,10 @@ class NotificationViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """Get notifications for current user"""
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return Notification.objects.none()
+        
         return Notification.objects.filter(
             recipient=self.request.user
         ).select_related('sender', 'post', 'comment').order_by('-created_at')
