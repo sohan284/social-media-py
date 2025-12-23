@@ -12,7 +12,12 @@ from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import PermissionDenied, NotFound
 from rest_framework.decorators import action
 from .models import *
-from .serializers import *
+from .serializers import (
+    SendOTPSerializer, VerifyOTPSerializer, SetCredentialsSerializer,
+    LoginSerializer, OAuthRegisterSerializer, OAuthLoginSerializer,
+    SendPasswordResetOTPSerializer, VerifyPasswordResetOTPSerializer, ResetPasswordSerializer,
+    ProfileSerializer, ProfileUpdateSerializer
+)
 from post.models import *
 from post.serializers import *
 from .utils import *
@@ -587,3 +592,124 @@ class OAuthLoginView(APIView):
                 {"error": f"An error occurred during login: {str(e)}"}, 
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+
+
+"""Password Reset Flow"""
+class SendPasswordResetOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = SendPasswordResetOTPSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response({
+                "success": False,
+                "error": "Invalid data",
+                "details": ser.errors
+            }, status=400)
+
+        email = ser.validated_data['email'].lower()
+        
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            # Don't reveal if user exists or not for security
+            return Response({
+                "success": True,
+                "message": "If an account exists with this email, an OTP has been sent."
+            }, status=200)
+
+        # Generate OTP
+        code = f"{random.randint(0, 999999):06d}"
+        user.verification_code = code
+        user.save()
+
+        # Send OTP email
+        send_mail(
+            subject='Password Reset Verification Code',
+            message=f'Your password reset verification code is {code}. This code will expire in 10 minutes.',
+            from_email=settings.EMAIL_HOST_USER,
+            recipient_list=[email],
+            fail_silently=False,
+        )
+
+        return Response({
+            "success": True,
+            "message": "If an account exists with this email, an OTP has been sent."
+        }, status=200)
+
+
+class VerifyPasswordResetOTPView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = VerifyPasswordResetOTPSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response({
+                "success": False,
+                "error": "Invalid data",
+                "details": ser.errors
+            }, status=400)
+
+        email = ser.validated_data['email'].lower()
+        code = ser.validated_data['code']
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found"
+            }, status=404)
+
+        if user.verification_code == code:
+            return Response({
+                "success": True,
+                "message": "OTP verified successfully. You can now reset your password."
+            }, status=200)
+
+        return Response({
+            "success": False,
+            "error": "Invalid or expired OTP"
+        }, status=400)
+
+
+class ResetPasswordView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        ser = ResetPasswordSerializer(data=request.data)
+        if not ser.is_valid():
+            return Response({
+                "success": False,
+                "error": "Invalid data",
+                "details": ser.errors
+            }, status=400)
+
+        email = ser.validated_data['email'].lower()
+        code = ser.validated_data['code']
+        new_password = ser.validated_data['new_password']
+
+        try:
+            user = User.objects.get(email=email)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found"
+            }, status=404)
+
+        # Verify OTP
+        if user.verification_code != code:
+            return Response({
+                "success": False,
+                "error": "Invalid or expired OTP"
+            }, status=400)
+
+        # Reset password
+        user.set_password(new_password)
+        user.verification_code = ''  # Clear OTP after use
+        user.save()
+
+        return Response({
+            "success": True,
+            "message": "Password reset successfully. You can now login with your new password."
+        }, status=200)

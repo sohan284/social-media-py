@@ -30,8 +30,15 @@ router.register(r'communities', CommunityViewSet, basename='community')
 router.register(r'join-requests', CommunityJoinRequestViewSet, basename='join-request')
 
 """ Chat Section """
-# router.register(r'chat/rooms', RoomViewSet)
+router.register(r'chat/rooms', RoomViewSet, basename='chat-room')
 
 urlpatterns = [
     path("", include(router.urls)),
+    # Chat user endpoints
+    path('chat/users/', ChatUserListView.as_view(), name='chat-users'),
+    path('chat/users/search/', ChatUserSearchView.as_view(), name='chat-user-search'),
+    # Direct messaging endpoints
+    path('chat/messages/send/', SendDirectMessageView.as_view(), name='send-direct-message'),
+    path('chat/messages/conversation/', GetConversationView.as_view(), name='get-conversation'),
+    path('chat/messages/conversations/', GetConversationsListView.as_view(), name='get-conversations-list'),
 ]
