@@ -17,4 +17,7 @@ urlpatterns = [
     path('password-reset/send-otp/', SendPasswordResetOTPView.as_view(), name='send-password-reset-otp'),
     path('password-reset/verify-otp/', VerifyPasswordResetOTPView.as_view(), name='verify-password-reset-otp'),
     path('password-reset/reset/', ResetPasswordView.as_view(), name='reset-password'),
+    # Admin endpoints
+    path('admin/users/', AdminUsersListView.as_view(), name='admin-users'),
+    path('admin/dashboard-analytics/', DashboardAnalyticsView.as_view(), name='dashboard-analytics'),
 ]

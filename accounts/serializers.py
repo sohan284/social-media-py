@@ -16,6 +16,54 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = ['id', 'username', 'email', 'avatar', 'display_name', 'is_online', 'last_seen']
 
+
+class AdminUserSerializer(serializers.ModelSerializer):
+    """Serializer for admin user list view with additional fields"""
+    avatar = serializers.SerializerMethodField(read_only=True)
+    display_name = serializers.SerializerMethodField(read_only=True)
+    posts_count = serializers.SerializerMethodField(read_only=True)
+    interests_count = serializers.SerializerMethodField(read_only=True)
+    
+    class Meta:
+        model = User
+        fields = [
+            'id', 'username', 'email', 'avatar', 'display_name', 
+            'role', 'is_active', 'date_joined', 'last_login',
+            'posts_count', 'interests_count'
+        ]
+    
+    def get_avatar(self, obj):
+        try:
+            if obj.profile.avatar:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.profile.avatar.url)
+                return obj.profile.avatar.url
+        except Profile.DoesNotExist:
+            pass
+        return None
+    
+    def get_display_name(self, obj):
+        try:
+            return obj.profile.display_name if obj.profile.display_name else obj.username
+        except Profile.DoesNotExist:
+            return obj.username
+    
+    def get_posts_count(self, obj):
+        """Get count of posts by this user"""
+        try:
+            from post.models import Post
+            return Post.objects.filter(user=obj).count()
+        except:
+            return 0
+    
+    def get_interests_count(self, obj):
+        """Get count of interests (subcategories) for this user"""
+        try:
+            return obj.profile.subcategories.count()
+        except Profile.DoesNotExist:
+            return 0
+
     def get_avatar(self, obj):
         try:
             return obj.profile.avatar.url if obj.profile.avatar else None
