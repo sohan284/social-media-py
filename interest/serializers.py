@@ -9,6 +9,7 @@ class SubCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = SubCategory
         fields = ['id', 'category_name', 'name']
+        ref_name = 'InterestSubCategory'
 
     def create(self, validated_data):
         category_name = validated_data.pop('category_name')
@@ -22,5 +23,6 @@ class CategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = Category
         fields = ['id', 'name', 'subcategories']
+        ref_name = 'InterestCategory'
 
 """ End of Serializers for Interest """

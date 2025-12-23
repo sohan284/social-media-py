@@ -116,6 +116,10 @@ class MarketplaceProductViewSet(viewsets.ModelViewSet):
         return ProductSerializer
     
     def get_queryset(self):
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return Product.objects.none()
+        
         queryset = super().get_queryset()
         user = self.request.user
         
