@@ -33,6 +33,19 @@ class PostViewSet(viewsets.ModelViewSet):
             return Post.objects.none()
         
         user = self.request.user
+        
+        # Admin users can see all posts regardless of status
+        if hasattr(user, 'role') and user.role == 'admin':
+            if self.action == 'list':
+                return Post.objects.select_related('user', 'community').prefetch_related(
+                    'likes', 'comments', 'shares'
+                ).order_by('-created_at')
+            else:
+                return Post.objects.select_related('user', 'community').prefetch_related(
+                    'likes', 'comments', 'shares'
+                ).order_by('-created_at')
+        
+        # Regular users see only approved posts or their own posts
         if self.action == 'list':
             return Post.objects.filter(status='approved').order_by('-created_at')
         else:
@@ -95,6 +108,55 @@ class PostViewSet(viewsets.ModelViewSet):
             "message": "Post created successfully",
             "data": serializer.data
         }, status=status.HTTP_201_CREATED, headers=headers)
+
+    def list(self, request, *args, **kwargs):
+        """List posts with pagination support"""
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        # Get pagination parameters
+        page_size = request.query_params.get('limit', None)
+        if page_size:
+            try:
+                page_size = int(page_size)
+                # Override pagination page size if limit is provided
+                self.pagination_class.page_size = page_size
+            except ValueError:
+                pass
+        
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response({
+                "success": True,
+                "message": "Posts retrieved successfully",
+                "data": serializer.data
+            })
+        
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "success": True,
+            "message": "Posts retrieved successfully",
+            "data": serializer.data
+        })
+
+    def destroy(self, request, *args, **kwargs):
+        """Delete post - admin can delete any post, users can only delete their own"""
+        post = self.get_object()
+        user = request.user
+        
+        # Admin users can delete any post
+        is_admin = hasattr(user, 'role') and user.role == 'admin'
+        
+        # Regular users can only delete their own posts
+        if not is_admin and post.user != user:
+            raise PermissionDenied("You do not have permission to delete this post.")
+        
+        self.perform_destroy(post)
+        return Response({
+            "success": True,
+            "message": "Post deleted successfully",
+            "data": None
+        }, status=status.HTTP_200_OK)
 
     def _calculate_post_score(self, post, user, time_decay_hours=24):
         """

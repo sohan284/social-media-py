@@ -6,7 +6,17 @@ from django.conf import settings
 import random
 from django.contrib.auth import authenticate
 from rest_framework_simplejwt.tokens import RefreshToken
-from .permissions import IsOwnerOrReadOnly
+from .permissions import IsOwnerOrReadOnly, IsAdmin
+from post.models import Post
+from post.serializers import PostSerializer
+from community.models import Community
+from django.db.models import Count, Q
+from django.utils import timezone
+from datetime import timedelta
+from post.models import Post
+from django.db.models import Count, Q
+from django.utils import timezone
+from datetime import timedelta
 from rest_framework.permissions import IsAuthenticated
 from django.shortcuts import get_object_or_404
 from rest_framework.exceptions import PermissionDenied, NotFound
@@ -16,7 +26,7 @@ from .serializers import (
     SendOTPSerializer, VerifyOTPSerializer, SetCredentialsSerializer,
     LoginSerializer, OAuthRegisterSerializer, OAuthLoginSerializer,
     SendPasswordResetOTPSerializer, VerifyPasswordResetOTPSerializer, ResetPasswordSerializer,
-    ProfileSerializer, ProfileUpdateSerializer
+    ProfileSerializer, ProfileUpdateSerializer, AdminUserSerializer
 )
 from post.models import *
 from post.serializers import *
@@ -206,7 +216,8 @@ class LoginView(APIView):
                 "error": "Invalid credentials"
                 }, status=401)
 
-        if not user.email_verified:
+        # Allow admin users to login without email verification
+        if not user.email_verified and user.role != 'admin':
             return Response({
                 "success": False,
                 "error": "Email not verified"
@@ -214,9 +225,103 @@ class LoginView(APIView):
         
         return Response({
             "success": True,
-            "message": "Login successful", 
-            "tokens": tokens_for_user(user)
+            "message": "Login successful",
+            "tokens": tokens_for_user(user),
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "role": user.role
+            }
             }, status=200)
+
+
+""" Admin Users List View """
+class AdminUsersListView(APIView):
+    """Get all users for admin panel"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def get(self, request):
+        """Get all users with additional information"""
+        users = User.objects.select_related('profile').prefetch_related('profile__subcategories').all().order_by('-date_joined')
+        
+        serializer = AdminUserSerializer(users, many=True, context={'request': request})
+        
+        return Response({
+            "success": True,
+            "data": serializer.data
+        }, status=200)
+
+
+class DashboardAnalyticsView(APIView):
+    """Get dashboard analytics for admin panel"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        # Total counts
+        total_users = User.objects.count()
+        total_posts = Post.objects.count()
+        total_communities = Community.objects.count()
+        
+        # Post status breakdown
+        approved_posts = Post.objects.filter(status='approved').count()
+        rejected_posts = Post.objects.filter(status='rejected').count()
+        pending_posts = Post.objects.filter(status='pending').count()
+        draft_posts = Post.objects.filter(status='draft').count()
+        
+        # Recent activity (last 7 days)
+        seven_days_ago = timezone.now() - timedelta(days=7)
+        recent_users = User.objects.filter(date_joined__gte=seven_days_ago).count()
+        recent_posts = Post.objects.filter(created_at__gte=seven_days_ago).count()
+        
+        # Activity data (last 30 days, grouped by day)
+        thirty_days_ago = timezone.now() - timedelta(days=30)
+        activity_data = []
+        for i in range(30):
+            day_start = thirty_days_ago + timedelta(days=i)
+            day_end = day_start + timedelta(days=1)
+            day_posts = Post.objects.filter(
+                created_at__gte=day_start,
+                created_at__lt=day_end
+            ).count()
+            day_users = User.objects.filter(
+                date_joined__gte=day_start,
+                date_joined__lt=day_end
+            ).count()
+            activity_data.append({
+                'date': day_start.strftime('%Y-%m-%d'),
+                'posts': day_posts,
+                'users': day_users,
+            })
+        
+        # Top 10 most liked posts
+        top_posts = Post.objects.annotate(
+            likes_count_annotated=Count('likes')
+        ).select_related('user', 'user__profile').prefetch_related('likes', 'comments', 'shares').order_by('-likes_count_annotated')[:10]
+        
+        top_posts_serializer = PostSerializer(top_posts, many=True, context={'request': request})
+        
+        return Response({
+            "success": True,
+            "message": "Dashboard analytics retrieved successfully",
+            "data": {
+                "total_users": total_users,
+                "total_posts": total_posts,
+                "total_communities": total_communities,
+                "post_status": {
+                    "approved": approved_posts,
+                    "rejected": rejected_posts,
+                    "pending": pending_posts,
+                    "draft": draft_posts,
+                },
+                "recent_activity": {
+                    "new_users_7d": recent_users,
+                    "new_posts_7d": recent_posts,
+                },
+                "activity_timeline": activity_data,
+                "top_posts": top_posts_serializer.data,
+            }
+        }, status=200)
 
     
 """ User Profile Section """

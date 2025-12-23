@@ -104,7 +104,7 @@ class MarketplaceSubCategoryViewSet(viewsets.ModelViewSet):
         return success_response("SubCategory deleted successfully.", None, status.HTTP_204_NO_CONTENT)
     
 class MarketplaceProductViewSet(viewsets.ModelViewSet):
-    queryset = Product.objects.select_related('user', 'sub_category', 'sub_category__category').all()
+    queryset = Product.objects.all()
     permission_classes = [IsAuthenticatedOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['status', 'condition', 'sub_category', 'sub_category__category']
