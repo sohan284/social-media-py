@@ -13,4 +13,8 @@ urlpatterns = [
     path('login/', LoginView.as_view(), name='login'),
     path('oauth/register/', OAuthRegisterView.as_view(), name='oauth-register'),
     path('oauth/login/', OAuthLoginView.as_view(), name='oauth-login'),
+    # Password Reset Endpoints
+    path('password-reset/send-otp/', SendPasswordResetOTPView.as_view(), name='send-password-reset-otp'),
+    path('password-reset/verify-otp/', VerifyPasswordResetOTPView.as_view(), name='verify-password-reset-otp'),
+    path('password-reset/reset/', ResetPasswordView.as_view(), name='reset-password'),
 ]
