@@ -6,15 +6,47 @@ from interest.models import SubCategory
 
 class UserSerializer(serializers.ModelSerializer):
     avatar = serializers.SerializerMethodField(read_only=True)
+    display_name = serializers.SerializerMethodField(read_only=True)
+    id = serializers.IntegerField(read_only=True)
+    email = serializers.EmailField(read_only=True)
+    is_online = serializers.SerializerMethodField(read_only=True)
+    last_seen = serializers.SerializerMethodField(read_only=True)
+    
     class Meta:
         model = User
-        fields = ['username', 'avatar']
+        fields = ['id', 'username', 'email', 'avatar', 'display_name', 'is_online', 'last_seen']
 
     def get_avatar(self, obj):
         try:
             return obj.profile.avatar.url if obj.profile.avatar else None
         except Profile.DoesNotExist:
             return None
+    
+    def get_display_name(self, obj):
+        try:
+            return obj.profile.display_name if obj.profile.display_name else obj.username
+        except Profile.DoesNotExist:
+            return obj.username
+    
+    def get_is_online(self, obj):
+        """Check if user is online (from cache or last_login)"""
+        from django.core.cache import cache
+        # Check cache first (set by WebSocket connections)
+        cached_status = cache.get(f'user_online_{obj.id}')
+        if cached_status is not None:
+            return cached_status
+        
+        # Fallback to last_login check
+        if not obj.last_login:
+            return False
+        from django.utils import timezone
+        from datetime import timedelta
+        # Consider user online if last_login was within last 5 minutes
+        return (timezone.now() - obj.last_login) < timedelta(minutes=5)
+    
+    def get_last_seen(self, obj):
+        """Get last seen time (last_login)"""
+        return obj.last_login.isoformat() if obj.last_login else None
 
 class SendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -69,6 +101,38 @@ class OAuthRegisterSerializer(serializers.Serializer):
 class OAuthLoginSerializer(serializers.Serializer):
     access_token = serializers.CharField()
     provider = serializers.ChoiceField(choices=['google', 'apple'])
+
+""" Password Reset Serializers """
+class SendPasswordResetOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+
+class VerifyPasswordResetOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.CharField(max_length=6)
+
+class ResetPasswordSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    code = serializers.CharField(max_length=6)
+    new_password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
+
+    def validate(self, data):
+        if data['new_password'] != data['confirm_password']:
+            raise serializers.ValidationError({
+                "confirm_password": "Passwords do not match."
+            })
+        return data
+
+    def validate_new_password(self, value):
+        """
+        Password rules:
+        - Minimum 8 characters
+        - Can include a-z, A-Z, 0-9, special characters
+        """
+        if len(value) < 8:
+            raise serializers.ValidationError("Password must be at least 8 characters long.")
+        validate_password(value)
+        return value
 
 """ Profile Section """
 class ProfileSerializer(serializers.ModelSerializer):
