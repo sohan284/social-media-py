@@ -57,4 +57,61 @@ class Message(models.Model):
     def __str__(self):
         return f"{self.sender.username if self.sender else 'Unknown'}: {self.content[:50]}"
 
+
+class BlockedUser(models.Model):
+    """Model to track blocked users in chat"""
+    blocker = models.ForeignKey(User, on_delete=models.CASCADE, related_name='blocked_users')
+    blocked = models.ForeignKey(User, on_delete=models.CASCADE, related_name='blocked_by_users')
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        unique_together = ('blocker', 'blocked')
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['blocker', '-created_at']),
+            models.Index(fields=['blocked', '-created_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.blocker.username} blocked {self.blocked.username}"
+
+
+class UserReport(models.Model):
+    """Model to track user reports in chat"""
+    REPORT_REASONS = [
+        ('spam', 'Spam'),
+        ('harassment', 'Harassment'),
+        ('inappropriate_content', 'Inappropriate Content'),
+        ('fake_account', 'Fake Account'),
+        ('other', 'Other'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('reviewed', 'Reviewed'),
+        ('resolved', 'Resolved'),
+        ('dismissed', 'Dismissed'),
+    ]
+    
+    reporter = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reports_made')
+    reported_user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='reports_received')
+    reason = models.CharField(max_length=50, choices=REPORT_REASONS)
+    description = models.TextField(blank=True, help_text='Additional details about the report')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='reports_reviewed')
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    admin_notes = models.TextField(blank=True, help_text='Admin notes about the report')
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['reported_user', 'status', '-created_at']),
+            models.Index(fields=['reporter', '-created_at']),
+            models.Index(fields=['status', '-created_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.reporter.username} reported {self.reported_user.username} - {self.reason}"
+
 """ End of Chat Models """

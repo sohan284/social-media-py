@@ -41,4 +41,11 @@ urlpatterns = [
     path('chat/messages/send/', SendDirectMessageView.as_view(), name='send-direct-message'),
     path('chat/messages/conversation/', GetConversationView.as_view(), name='get-conversation'),
     path('chat/messages/conversations/', GetConversationsListView.as_view(), name='get-conversations-list'),
+    # Block and Report endpoints
+    path('chat/block/', BlockUserView.as_view(), name='block-user'),
+    path('chat/unblock/', UnblockUserView.as_view(), name='unblock-user'),
+    path('chat/blocked-users/', BlockedUsersListView.as_view(), name='blocked-users-list'),
+    path('chat/report/', ReportUserView.as_view(), name='report-user'),
+    path('chat/reports/', UserReportsListView.as_view(), name='user-reports-list'),
+    path('chat/reports/<int:report_id>/update/', UpdateReportStatusView.as_view(), name='update-report-status'),
 ]

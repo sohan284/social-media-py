@@ -1,5 +1,5 @@
 from rest_framework import serializers 
-from .models import Room, Message
+from .models import Room, Message, BlockedUser, UserReport
 from accounts.serializers import UserSerializer
 
 """ Serializers for Chat """
@@ -56,5 +56,47 @@ class RoomSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             return obj.is_admin(request.user)
         return False
+
+
+class BlockedUserSerializer(serializers.ModelSerializer):
+    """Serializer for BlockedUser model"""
+    blocked_user = UserSerializer(source='blocked', read_only=True)
+    blocked_user_id = serializers.IntegerField(source='blocked.id', read_only=True)
+    
+    class Meta:
+        model = BlockedUser
+        fields = ['id', 'blocked_user', 'blocked_user_id', 'created_at']
+        read_only_fields = ['blocker', 'created_at']
+
+
+class UserReportSerializer(serializers.ModelSerializer):
+    """Serializer for UserReport model"""
+    reported_user = UserSerializer(read_only=True)
+    reported_user_id = serializers.IntegerField(source='reported_user.id', read_only=True)
+    reporter = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = UserReport
+        fields = [
+            'id', 'reporter', 'reported_user', 'reported_user_id', 
+            'reason', 'description', 'status', 'created_at', 
+            'reviewed_by', 'reviewed_at', 'admin_notes'
+        ]
+        read_only_fields = ['reporter', 'status', 'created_at', 'reviewed_by', 'reviewed_at', 'admin_notes']
+
+
+class CreateUserReportSerializer(serializers.ModelSerializer):
+    """Serializer for creating a user report"""
+    
+    class Meta:
+        model = UserReport
+        fields = ['reported_user', 'reason', 'description']
+    
+    def validate_reported_user(self, value):
+        """Ensure user cannot report themselves"""
+        request = self.context.get('request')
+        if request and request.user == value:
+            raise serializers.ValidationError("You cannot report yourself.")
+        return value
 
 """ End of Serializers for Chat """
