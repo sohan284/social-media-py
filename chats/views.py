@@ -4,9 +4,14 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.db.models import Q, Max
 from django.contrib.auth import get_user_model
-from .models import Room, Message
-from .serializers import RoomSerializer, MessageSerializer
+from django.utils import timezone
+from .models import Room, Message, BlockedUser, UserReport
+from .serializers import (
+    RoomSerializer, MessageSerializer, BlockedUserSerializer, 
+    UserReportSerializer, CreateUserReportSerializer
+)
 from accounts.serializers import UserSerializer
+from accounts.permissions import IsAdmin
 from post.models import Follow
 
 User = get_user_model()
@@ -18,10 +23,25 @@ class RoomViewSet(viewsets.ModelViewSet):
     serializer_class = RoomSerializer
 
     def get_queryset(self):
-        """Get rooms where current user is a participant"""
-        return Room.objects.filter(participants=self.request.user).annotate(
+        """Get rooms where current user is a participant, excluding blocked users"""
+        # Get IDs of users blocked by current user
+        blocked_user_ids = BlockedUser.objects.filter(
+            blocker=self.request.user
+        ).values_list('blocked_id', flat=True)
+        
+        # Get rooms where current user is a participant
+        rooms = Room.objects.filter(participants=self.request.user).annotate(
             last_message_time=Max('messages__created_at')
         ).order_by('-last_message_time', '-updated_at').distinct()
+        
+        # For one-on-one chats, exclude rooms with blocked users
+        if blocked_user_ids:
+            rooms = rooms.exclude(
+                is_group=False,
+                participants__id__in=blocked_user_ids
+            )
+        
+        return rooms
 
     def create(self, request, *args, **kwargs):
         """Create a chat room (one-on-one or group)"""
@@ -44,6 +64,19 @@ class RoomViewSet(viewsets.ModelViewSet):
                     "success": False,
                     "error": "Cannot create chat with yourself"
                 }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Check if user is blocked
+            if BlockedUser.objects.filter(blocker=request.user, blocked=other_user).exists():
+                return Response({
+                    "success": False,
+                    "error": "You have blocked this user"
+                }, status=status.HTTP_403_FORBIDDEN)
+            
+            if BlockedUser.objects.filter(blocker=other_user, blocked=request.user).exists():
+                return Response({
+                    "success": False,
+                    "error": "This user has blocked you"
+                }, status=status.HTTP_403_FORBIDDEN)
             
             # Check if room already exists
             existing_room = Room.objects.filter(
@@ -137,6 +170,16 @@ class RoomViewSet(viewsets.ModelViewSet):
                 "success": False,
                 "error": "Message content is required"
             }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if sender is blocked by any participant (for one-on-one chats)
+        if not room.is_group:
+            other_participant = room.get_other_participant(request.user)
+            if other_participant:
+                if BlockedUser.objects.filter(blocker=other_participant, blocked=request.user).exists():
+                    return Response({
+                        "success": False,
+                        "error": "This user has blocked you"
+                    }, status=status.HTTP_403_FORBIDDEN)
         
         message = Message.objects.create(
             room=room,
@@ -334,8 +377,16 @@ class ChatUserListView(APIView):
         from django.core.cache import cache
         cache.set(f'user_online_{request.user.id}', True, timeout=300)  # 5 minutes
         
-        # Get all users except current user, limit to 20
-        all_users = User.objects.exclude(id=request.user.id).select_related('profile')[:20]
+        # Get IDs of users blocked by current user
+        blocked_user_ids = BlockedUser.objects.filter(
+            blocker=request.user
+        ).values_list('blocked_id', flat=True)
+        
+        # Get all users except current user and blocked users, limit to 20
+        all_users = User.objects.exclude(id=request.user.id).select_related('profile')
+        if blocked_user_ids:
+            all_users = all_users.exclude(id__in=blocked_user_ids)
+        all_users = all_users[:20]
         
         serializer = UserSerializer(all_users, many=True, context={'request': request})
         return Response({
@@ -358,10 +409,20 @@ class ChatUserSearchView(APIView):
                 "error": "Search query must be at least 2 characters"
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        # Get IDs of users blocked by current user
+        blocked_user_ids = BlockedUser.objects.filter(
+            blocker=request.user
+        ).values_list('blocked_id', flat=True)
+        
         users = User.objects.filter(
             Q(username__icontains=query) | 
             Q(email__icontains=query)
-        ).exclude(id=request.user.id)[:20]  # Limit to 20 results
+        ).exclude(id=request.user.id)
+        
+        if blocked_user_ids:
+            users = users.exclude(id__in=blocked_user_ids)
+        
+        users = users[:20]  # Limit to 20 results
         
         serializer = UserSerializer(users, many=True, context={'request': request})
         return Response({
@@ -404,6 +465,19 @@ class SendDirectMessageView(APIView):
                 "success": False,
                 "error": "Cannot send message to yourself"
             }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if user is blocked
+        if BlockedUser.objects.filter(blocker=request.user, blocked=receiver).exists():
+            return Response({
+                "success": False,
+                "error": "You have blocked this user"
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        if BlockedUser.objects.filter(blocker=receiver, blocked=request.user).exists():
+            return Response({
+                "success": False,
+                "error": "This user has blocked you"
+            }, status=status.HTTP_403_FORBIDDEN)
         
         # Create direct message
         message = Message.objects.create(
@@ -480,7 +554,11 @@ class GetConversationView(APIView):
                 "error": "User not found"
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Get all messages between current user and other user
+        # Check block status (but still allow viewing messages)
+        i_blocked_them = BlockedUser.objects.filter(blocker=request.user, blocked=other_user).exists()
+        they_blocked_me = BlockedUser.objects.filter(blocker=other_user, blocked=request.user).exists()
+        
+        # Get all messages between current user and other user (even if blocked)
         messages = Message.objects.filter(
             Q(sender=request.user, receiver=other_user) |
             Q(sender=other_user, receiver=request.user)
@@ -495,13 +573,17 @@ class GetConversationView(APIView):
         
         serializer = MessageSerializer(messages, many=True, context={'request': request})
         
-        # Include user info with last_seen
+        # Include user info with last_seen and block status
         user_serializer = UserSerializer(other_user, context={'request': request})
         
         return Response({
             "success": True,
             "data": serializer.data,
-            "user": user_serializer.data  # Include user info with online status and last_seen
+            "user": user_serializer.data,  # Include user info with online status and last_seen
+            "block_status": {
+                "i_blocked_them": i_blocked_them,
+                "they_blocked_me": they_blocked_me,
+            }
         })
 
 
@@ -513,11 +595,12 @@ class GetConversationsListView(APIView):
         # Mark current user as online when they visit chat
         from django.core.cache import cache
         cache.set(f'user_online_{request.user.id}', True, timeout=300)  # 5 minutes
+        
         # Get all users the current user has sent or received messages from
         sent_to = Message.objects.filter(sender=request.user).values_list('receiver_id', flat=True).distinct()
         received_from = Message.objects.filter(receiver=request.user).values_list('sender_id', flat=True).distinct()
         
-        # Combine and get unique user IDs
+        # Combine and get unique user IDs (include blocked users so they appear in list)
         user_ids = set(list(sent_to) + list(received_from))
         
         # Get the latest message for each conversation
@@ -536,11 +619,17 @@ class GetConversationsListView(APIView):
                     is_read=False
                 ).count()
                 
+                # Check block status
+                i_blocked_them = BlockedUser.objects.filter(blocker=request.user, blocked=other_user).exists()
+                they_blocked_me = BlockedUser.objects.filter(blocker=other_user, blocked=request.user).exists()
+                
                 conversations.append({
                     'user': UserSerializer(other_user, context={'request': request}).data,
                     'last_message': MessageSerializer(last_message, context={'request': request}).data if last_message else None,
                     'unread_count': unread_count,
-                    'last_message_time': last_message.created_at.isoformat() if last_message else None
+                    'last_message_time': last_message.created_at.isoformat() if last_message else None,
+                    'i_blocked_them': i_blocked_them,
+                    'they_blocked_me': they_blocked_me,
                 })
             except User.DoesNotExist:
                 continue
@@ -552,3 +641,178 @@ class GetConversationsListView(APIView):
             "success": True,
             "data": conversations
         })
+
+
+""" Block and Report Views """
+class BlockUserView(APIView):
+    """Block a user"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        user_id = request.data.get('user_id')
+        
+        if not user_id:
+            return Response({
+                "success": False,
+                "error": "user_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            user_to_block = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        if user_to_block == request.user:
+            return Response({
+                "success": False,
+                "error": "You cannot block yourself"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if already blocked
+        blocked, created = BlockedUser.objects.get_or_create(
+            blocker=request.user,
+            blocked=user_to_block
+        )
+        
+        if not created:
+            return Response({
+                "success": False,
+                "error": "User is already blocked"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        serializer = BlockedUserSerializer(blocked, context={'request': request})
+        return Response({
+            "success": True,
+            "message": f"You have blocked {user_to_block.username}",
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED)
+
+
+class UnblockUserView(APIView):
+    """Unblock a user"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        user_id = request.data.get('user_id')
+        
+        if not user_id:
+            return Response({
+                "success": False,
+                "error": "user_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            blocked_user = BlockedUser.objects.get(
+                blocker=request.user,
+                blocked_id=user_id
+            )
+        except BlockedUser.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User is not blocked"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        username = blocked_user.blocked.username
+        blocked_user.delete()
+        
+        return Response({
+            "success": True,
+            "message": f"You have unblocked {username}"
+        }, status=status.HTTP_200_OK)
+
+
+class BlockedUsersListView(APIView):
+    """Get list of blocked users"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        blocked_users = BlockedUser.objects.filter(blocker=request.user).select_related('blocked')
+        serializer = BlockedUserSerializer(blocked_users, many=True, context={'request': request})
+        
+        return Response({
+            "success": True,
+            "data": serializer.data
+        })
+
+
+class ReportUserView(APIView):
+    """Report a user"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        serializer = CreateUserReportSerializer(data=request.data, context={'request': request})
+        
+        if serializer.is_valid():
+            report = serializer.save(reporter=request.user)
+            report_serializer = UserReportSerializer(report, context={'request': request})
+            
+            return Response({
+                "success": True,
+                "message": "User has been reported. Our team will review this report.",
+                "data": report_serializer.data
+            }, status=status.HTTP_201_CREATED)
+        
+        return Response({
+            "success": False,
+            "error": serializer.errors
+        }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class UserReportsListView(APIView):
+    """Get list of user reports (admin only)"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def get(self, request):
+        status_filter = request.query_params.get('status', None)
+        queryset = UserReport.objects.all().select_related('reporter', 'reported_user', 'reviewed_by')
+        
+        if status_filter:
+            queryset = queryset.filter(status=status_filter)
+        
+        queryset = queryset.order_by('-created_at')
+        serializer = UserReportSerializer(queryset, many=True, context={'request': request})
+        
+        return Response({
+            "success": True,
+            "data": serializer.data
+        })
+
+
+class UpdateReportStatusView(APIView):
+    """Update report status (admin only)"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def patch(self, request, report_id):
+        try:
+            report = UserReport.objects.get(id=report_id)
+        except UserReport.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Report not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        new_status = request.data.get('status')
+        admin_notes = request.data.get('admin_notes', '')
+        
+        if new_status and new_status in dict(UserReport.STATUS_CHOICES):
+            report.status = new_status
+            report.reviewed_by = request.user
+            report.reviewed_at = timezone.now()
+            if admin_notes:
+                report.admin_notes = admin_notes
+            report.save()
+            
+            serializer = UserReportSerializer(report, context={'request': request})
+            return Response({
+                "success": True,
+                "message": "Report status updated",
+                "data": serializer.data
+            }, status=status.HTTP_200_OK)
+        
+        return Response({
+            "success": False,
+            "error": "Invalid status"
+        }, status=status.HTTP_400_BAD_REQUEST)

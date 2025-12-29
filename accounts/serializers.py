@@ -15,6 +15,43 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = ['id', 'username', 'email', 'avatar', 'display_name', 'is_online', 'last_seen']
+    
+    def get_avatar(self, obj):
+        try:
+            if obj.profile.avatar:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.profile.avatar.url)
+                return obj.profile.avatar.url
+        except Profile.DoesNotExist:
+            pass
+        return None
+    
+    def get_display_name(self, obj):
+        try:
+            return obj.profile.display_name if obj.profile.display_name else obj.username
+        except Profile.DoesNotExist:
+            return obj.username
+    
+    def get_is_online(self, obj):
+        """Check if user is online (from cache or last_login)"""
+        from django.core.cache import cache
+        # Check cache first (set by WebSocket connections)
+        cached_status = cache.get(f'user_online_{obj.id}')
+        if cached_status is not None:
+            return cached_status
+        
+        # Fallback to last_login check
+        if not obj.last_login:
+            return False
+        from django.utils import timezone
+        from datetime import timedelta
+        # Consider user online if last_login was within last 5 minutes
+        return (timezone.now() - obj.last_login) < timedelta(minutes=5)
+    
+    def get_last_seen(self, obj):
+        """Get last seen time (last_login)"""
+        return obj.last_login.isoformat() if obj.last_login else None
 
 
 class AdminUserSerializer(serializers.ModelSerializer):
@@ -63,38 +100,6 @@ class AdminUserSerializer(serializers.ModelSerializer):
             return obj.profile.subcategories.count()
         except Profile.DoesNotExist:
             return 0
-
-    def get_avatar(self, obj):
-        try:
-            return obj.profile.avatar.url if obj.profile.avatar else None
-        except Profile.DoesNotExist:
-            return None
-    
-    def get_display_name(self, obj):
-        try:
-            return obj.profile.display_name if obj.profile.display_name else obj.username
-        except Profile.DoesNotExist:
-            return obj.username
-    
-    def get_is_online(self, obj):
-        """Check if user is online (from cache or last_login)"""
-        from django.core.cache import cache
-        # Check cache first (set by WebSocket connections)
-        cached_status = cache.get(f'user_online_{obj.id}')
-        if cached_status is not None:
-            return cached_status
-        
-        # Fallback to last_login check
-        if not obj.last_login:
-            return False
-        from django.utils import timezone
-        from datetime import timedelta
-        # Consider user online if last_login was within last 5 minutes
-        return (timezone.now() - obj.last_login) < timedelta(minutes=5)
-    
-    def get_last_seen(self, obj):
-        """Get last seen time (last_login)"""
-        return obj.last_login.isoformat() if obj.last_login else None
 
 class SendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
