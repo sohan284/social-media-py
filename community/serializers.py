@@ -11,6 +11,9 @@ class CommunitySerializer(serializers.ModelSerializer):
     user_role = serializers.SerializerMethodField()
     can_post = serializers.SerializerMethodField()
     can_manage = serializers.SerializerMethodField()
+    user_has_pending_request = serializers.SerializerMethodField()
+    user_has_pending_invitation = serializers.SerializerMethodField()
+    can_view = serializers.SerializerMethodField()
     
     class Meta:
         model = Community
@@ -18,7 +21,7 @@ class CommunitySerializer(serializers.ModelSerializer):
             'id', 'name', 'title', 'description', 'profile_image', 'cover_image',
             'visibility', 'created_at', 'created_by', 'created_by_username',
             'updated_at', 'members_count', 'posts_count', 'is_member', 
-            'user_role', 'can_post', 'can_manage'
+            'user_role', 'can_post', 'can_manage', 'user_has_pending_request', 'user_has_pending_invitation', 'can_view'
         ]
         read_only_fields = ['created_by', 'members_count', 'posts_count', 'created_at', 'updated_at']
     
@@ -44,16 +47,26 @@ class CommunitySerializer(serializers.ModelSerializer):
         return None
     
     def get_can_post(self, obj):
+        """Check if user can post in the community"""
         request = self.context.get('request')
         if request and request.user.is_authenticated:
+            # Creator can always post
             if obj.created_by == request.user:
                 return True
-            membership = CommunityMember.objects.filter(
-                user=request.user, 
-                community=obj, 
-                is_approved=True
-            ).first()
-            return membership is not None
+            
+            # Public: everyone can post
+            if obj.visibility == 'public':
+                return True
+            
+            # Restricted/Private: only approved members can post
+            if obj.visibility in ['restricted', 'private']:
+                membership = CommunityMember.objects.filter(
+                    user=request.user, 
+                    community=obj, 
+                    is_approved=True
+                ).first()
+                return membership is not None
+        
         return False
     
     def get_can_manage(self, obj):
@@ -67,6 +80,60 @@ class CommunitySerializer(serializers.ModelSerializer):
                 is_approved=True
             ).first()
             return membership and membership.role in ['admin', 'moderator']
+        return False
+    
+    def get_user_has_pending_request(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            # Check if queryset annotation exists
+            if hasattr(obj, 'user_has_pending_request'):
+                return obj.user_has_pending_request
+            # Fallback: query directly
+            return CommunityJoinRequest.objects.filter(
+                user=request.user,
+                community=obj,
+                status='pending'
+            ).exists()
+        return False
+    
+    def get_user_has_pending_invitation(self, obj):
+        request = self.context.get('request')
+        if request and request.user.is_authenticated:
+            # Check if queryset annotation exists
+            if hasattr(obj, 'user_has_pending_invitation'):
+                return obj.user_has_pending_invitation
+            # Fallback: query directly
+            return CommunityInvitation.objects.filter(
+                invitee=request.user,
+                community=obj,
+                status='pending'
+            ).exists()
+        return False
+    
+    def get_can_view(self, obj):
+        """Check if user can view the community"""
+        request = self.context.get('request')
+        if not request or not request.user.is_authenticated:
+            return False
+        
+        # Public and restricted: everyone can view
+        if obj.visibility in ['public', 'restricted']:
+            return True
+        
+        # Private: approved members OR users with pending invitation can view
+        if obj.visibility == 'private':
+            is_member = CommunityMember.objects.filter(
+                user=request.user,
+                community=obj,
+                is_approved=True
+            ).exists()
+            has_invitation = CommunityInvitation.objects.filter(
+                invitee=request.user,
+                community=obj,
+                status='pending'
+            ).exists()
+            return is_member or has_invitation
+        
         return False
     
     def create(self, validated_data):
@@ -87,15 +154,34 @@ class CommunitySerializer(serializers.ModelSerializer):
 class CommunityMemberSerializer(serializers.ModelSerializer):
     """Serializer for Community Members"""
     username = serializers.CharField(source='user.username', read_only=True)
+    user_avatar = serializers.SerializerMethodField(read_only=True)
+    user_display_name = serializers.SerializerMethodField(read_only=True)
     community_name = serializers.CharField(source='community.name', read_only=True)
     
     class Meta:
         model = CommunityMember
         fields = [
-            'id', 'user', 'username', 'community', 'community_name',
+            'id', 'user', 'username', 'user_avatar', 'user_display_name', 'community', 'community_name',
             'role', 'is_approved', 'joined_at'
         ]
         read_only_fields = ['user', 'joined_at']
+    
+    def get_user_avatar(self, obj):
+        try:
+            if obj.user.profile.avatar:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.user.profile.avatar.url)
+                return obj.user.profile.avatar.url
+        except:
+            pass
+        return None
+    
+    def get_user_display_name(self, obj):
+        try:
+            return obj.user.profile.display_name if obj.user.profile.display_name else obj.user.username
+        except:
+            return obj.user.username
 
 
 class CommunityRuleSerializer(serializers.ModelSerializer):
@@ -133,8 +219,7 @@ class CommunityInvitationSerializer(serializers.ModelSerializer):
             recipient=invitation.invitee,
             sender=request.user,
             notification_type='community_invite',
-            community=invitation.community,
-            message=f"invited you to join {invitation.community.title}"
+            community=invitation.community
         )
         
         return invitation
@@ -143,6 +228,8 @@ class CommunityInvitationSerializer(serializers.ModelSerializer):
 class CommunityJoinRequestSerializer(serializers.ModelSerializer):
     """Serializer for Community Join Requests"""
     username = serializers.CharField(source='user.username', read_only=True)
+    user_avatar = serializers.SerializerMethodField(read_only=True)
+    user_display_name = serializers.SerializerMethodField(read_only=True)
     community_name = serializers.CharField(source='community.name', read_only=True)
     community_title = serializers.CharField(source='community.title', read_only=True)
     reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True)
@@ -150,10 +237,27 @@ class CommunityJoinRequestSerializer(serializers.ModelSerializer):
     class Meta:
         model = CommunityJoinRequest
         fields = [
-            'id', 'user', 'username', 'community', 'community_name', 'community_title',
+            'id', 'user', 'username', 'user_avatar', 'user_display_name', 'community', 'community_name', 'community_title',
             'status', 'message', 'created_at', 'reviewed_by', 'reviewed_by_username', 'reviewed_at'
         ]
         read_only_fields = ['user', 'status', 'created_at', 'reviewed_by', 'reviewed_at']
+    
+    def get_user_avatar(self, obj):
+        try:
+            if obj.user.profile.avatar:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.user.profile.avatar.url)
+                return obj.user.profile.avatar.url
+        except:
+            pass
+        return None
+    
+    def get_user_display_name(self, obj):
+        try:
+            return obj.user.profile.display_name if obj.user.profile.display_name else obj.user.username
+        except:
+            return obj.user.username
     
     def create(self, validated_data):
         request = self.context.get('request')
@@ -172,8 +276,7 @@ class CommunityJoinRequestSerializer(serializers.ModelSerializer):
                 recipient=admin.user,
                 sender=request.user,
                 notification_type='community_join_request',
-                community=join_request.community,
-                message=f"wants to join {join_request.community.title}"
+                community=join_request.community
             )
         
         return join_request

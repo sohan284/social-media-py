@@ -28,6 +28,7 @@ router.register(r'marketplace/items', MarketplaceProductViewSet, basename="marke
 """ Community Section """
 router.register(r'communities', CommunityViewSet, basename='community')
 router.register(r'join-requests', CommunityJoinRequestViewSet, basename='join-request')
+router.register(r'invitations', CommunityInvitationViewSet, basename='invitation')
 
 """ Chat Section """
 router.register(r'chat/rooms', RoomViewSet, basename='chat-room')
@@ -48,4 +49,6 @@ urlpatterns = [
     path('chat/report/', ReportUserView.as_view(), name='report-user'),
     path('chat/reports/', UserReportsListView.as_view(), name='user-reports-list'),
     path('chat/reports/<int:report_id>/update/', UpdateReportStatusView.as_view(), name='update-report-status'),
+    # Community invitation endpoints
+    path('communities/invite/', InviteUserToCommunityView.as_view(), name='invite-user-to-community'),
 ]

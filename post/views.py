@@ -65,7 +65,7 @@ class PostViewSet(viewsets.ModelViewSet):
         # Check content for inappropriate material
         is_approved, rejection_reason = moderate_post(title, content, media_files)
         
-        # If posting to a community, verify membership
+        # If posting to a community, verify permissions based on visibility
         if community:
             membership = CommunityMember.objects.filter(
                 user=self.request.user,
@@ -73,8 +73,16 @@ class PostViewSet(viewsets.ModelViewSet):
                 is_approved=True
             ).first()
             
-            if not membership:
-                raise PermissionDenied("You must be a member to post in this community.")
+            # Check posting permissions based on community visibility
+            if community.visibility == 'private':
+                # Private: Only approved members can post
+                if not membership:
+                    raise PermissionDenied("You must be an approved member to post in this private community.")
+            elif community.visibility == 'restricted':
+                # Restricted: Everyone can view, but only approved members can post
+                if not membership:
+                    raise PermissionDenied("You must be an approved member to post in this restricted community. You can view posts but cannot create new ones.")
+            # Public: Everyone can post (no check needed)
             
             # Determine post status based on moderation and community settings
             if not is_approved:
@@ -434,19 +442,18 @@ class PostViewSet(viewsets.ModelViewSet):
                 "error": "Community not found"
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Check if user can view posts
-        if community.visibility == 'private':
-            membership = CommunityMember.objects.filter(
-                user=request.user,
-                community=community,
-                is_approved=True
-            ).first()
-            
-            if not membership:
-                return Response({
-                    "success": False,
-                    "error": "You must be a member to view posts in this private community"
-                }, status=status.HTTP_403_FORBIDDEN)
+        # Check if user is a member - ALL communities require membership to view posts
+        membership = CommunityMember.objects.filter(
+            user=request.user,
+            community=community,
+            is_approved=True
+        ).first()
+        
+        if not membership:
+            return Response({
+                "success": False,
+                "error": "You must be a member of this community to view posts"
+            }, status=status.HTTP_403_FORBIDDEN)
         
         posts = Post.objects.filter(
             community=community,
