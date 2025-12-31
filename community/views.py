@@ -2,6 +2,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.views import APIView
 from django.db.models import Q, Count, Exists, OuterRef
 from django.contrib.auth import get_user_model
 from django.utils import timezone
@@ -33,15 +34,39 @@ class CommunityViewSet(viewsets.ModelViewSet):
         user = self.request.user
         
         if self.action == 'list':
-            # Show public communities and communities user is member of
+            # Show:
+            # - Public communities (everyone can see)
+            # - Restricted communities (everyone can see, but only approved members can post)
+            # - Private communities (only if user is approved member OR has pending invitation)
+            # Exclude private communities where user has declined invitation
             return Community.objects.filter(
-                Q(visibility='public') | Q(members__user=user, members__is_approved=True)
+                Q(visibility='public') | 
+                Q(visibility='restricted') |
+                Q(visibility='private', members__user=user, members__is_approved=True) |
+                Q(visibility='private', invitations__invitee=user, invitations__status='pending')
+            ).exclude(
+                Q(visibility='private') & 
+                Q(invitations__invitee=user, invitations__status='declined')
             ).distinct().annotate(
                 user_is_member=Exists(
                     CommunityMember.objects.filter(
                         community=OuterRef('pk'),
                         user=user,
                         is_approved=True
+                    )
+                ),
+                user_has_pending_request=Exists(
+                    CommunityJoinRequest.objects.filter(
+                        community=OuterRef('pk'),
+                        user=user,
+                        status='pending'
+                    )
+                ),
+                user_has_pending_invitation=Exists(
+                    CommunityInvitation.objects.filter(
+                        community=OuterRef('pk'),
+                        invitee=user,
+                        status='pending'
                     )
                 )
             ).order_by('-members_count', '-created_at')
@@ -78,6 +103,23 @@ class CommunityViewSet(viewsets.ModelViewSet):
     
     def retrieve(self, request, *args, **kwargs):
         instance = self.get_object()
+        user = request.user
+        
+        # Check permissions for private communities
+        if instance.visibility == 'private':
+            membership = CommunityMember.objects.filter(
+                user=user,
+                community=instance,
+                is_approved=True
+            ).first()
+            
+            if not membership:
+                return Response({
+                    "success": False,
+                    "error": "You must be an approved member to view this private community"
+                }, status=status.HTTP_403_FORBIDDEN)
+        
+        # For restricted/public, everyone can view
         serializer = self.get_serializer(instance)
         return Response({
             "success": True,
@@ -120,9 +162,13 @@ class CommunityViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def popular(self, request):
         """Get popular communities based on members count"""
+        user = request.user
+        # Show public, restricted, and private communities user is member of
         communities = Community.objects.filter(
-            visibility='public'
-        ).order_by('-members_count', '-posts_count')[:20]
+            Q(visibility='public') | 
+            Q(visibility='restricted') |
+            Q(visibility='private', members__user=user, members__is_approved=True)
+        ).distinct().order_by('-members_count', '-posts_count')[:20]
         
         page = self.paginate_queryset(communities)
         if page is not None:
@@ -189,8 +235,12 @@ class CommunityViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['get'])
     def members(self, request, name=None):
-        """Get all members of a community"""
+        """Get all members of a community - Only creator can view"""
         community = self.get_object()
+        
+        # Only creator can view members list
+        if community.created_by != request.user:
+            raise PermissionDenied("Only the community creator can view the members list.")
         
         members = CommunityMember.objects.filter(
             community=community,
@@ -199,14 +249,14 @@ class CommunityViewSet(viewsets.ModelViewSet):
         
         page = self.paginate_queryset(members)
         if page is not None:
-            serializer = CommunityMemberSerializer(page, many=True)
+            serializer = CommunityMemberSerializer(page, many=True, context={'request': request})
             return self.get_paginated_response({
                 "success": True,
                 "message": "Community members retrieved successfully",
                 "data": serializer.data
             })
         
-        serializer = CommunityMemberSerializer(members, many=True)
+        serializer = CommunityMemberSerializer(members, many=True, context={'request': request})
         return Response({
             "success": True,
             "message": "Community members retrieved successfully",
@@ -271,8 +321,7 @@ class CommunityViewSet(viewsets.ModelViewSet):
                     recipient=admin.user,
                     sender=user,
                     notification_type='community_join_request',
-                    community=community,
-                    message=f"wants to join {community.title}"
+                    community=community
                 )
             
             return Response({
@@ -357,8 +406,7 @@ class CommunityViewSet(viewsets.ModelViewSet):
             recipient=member.user,
             sender=request.user,
             notification_type='community_role_changed',
-            community=community,
-            message=f"changed your role from {old_role} to {new_role} in {community.title}"
+            community=community
         )
         
         return Response({
@@ -438,17 +486,12 @@ class CommunityJoinRequestViewSet(viewsets.ModelViewSet):
         user = self.request.user
         community_name = self.request.query_params.get('community')
         
-        # Admins/moderators see all pending requests for their communities
+        # Only creator can see join requests for their communities
         if community_name:
             try:
                 community = Community.objects.get(name=community_name)
-                membership = CommunityMember.objects.filter(
-                    user=user,
-                    community=community,
-                    is_approved=True
-                ).first()
-                
-                if membership and membership.role in ['admin', 'moderator']:
+                # Only creator can view join requests
+                if community.created_by == user:
                     return CommunityJoinRequest.objects.filter(
                         community=community
                     ).order_by('-created_at')
@@ -492,8 +535,7 @@ class CommunityJoinRequestViewSet(viewsets.ModelViewSet):
             recipient=join_request.user,
             sender=request.user,
             notification_type='community_join_approved',
-            community=community,
-            message=f"approved your request to join {community.title}"
+            community=community
         )
         
         return Response({
@@ -528,3 +570,246 @@ class CommunityJoinRequestViewSet(viewsets.ModelViewSet):
             "message": "Join request rejected",
             "data": CommunityJoinRequestSerializer(join_request).data
         })
+    
+    def destroy(self, request, *args, **kwargs):
+        """Cancel/Delete a join request - users can only cancel their own pending requests"""
+        join_request = self.get_object()
+        
+        # Users can only cancel their own pending requests
+        if join_request.user != request.user:
+            raise PermissionDenied("You can only cancel your own join requests.")
+        
+        # Only allow canceling pending requests
+        if join_request.status != 'pending':
+            return Response({
+                "success": False,
+                "error": "You can only cancel pending requests."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        self.perform_destroy(join_request)
+        
+        return Response({
+            "success": True,
+            "message": "Join request cancelled successfully",
+            "data": None
+        }, status=status.HTTP_200_OK)
+    
+    @action(detail=False, methods=['post'])
+    def cancel(self, request):
+        """Cancel a join request by community name"""
+        community_name = request.data.get('community')
+        
+        if not community_name:
+            return Response({
+                "success": False,
+                "error": "community parameter is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            community = Community.objects.get(name=community_name)
+        except Community.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Community not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Find the user's pending join request
+        join_request = CommunityJoinRequest.objects.filter(
+            user=request.user,
+            community=community,
+            status='pending'
+        ).first()
+        
+        if not join_request:
+            return Response({
+                "success": False,
+                "error": "No pending join request found for this community"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        join_request.delete()
+        
+        return Response({
+            "success": True,
+            "message": "Join request cancelled successfully",
+            "data": None
+        }, status=status.HTTP_200_OK)
+
+
+class CommunityInvitationViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing community invitations"""
+    queryset = CommunityInvitation.objects.all()
+    serializer_class = CommunityInvitationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'patch', 'delete']
+    
+    def get_queryset(self):
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return CommunityInvitation.objects.none()
+        
+        user = self.request.user
+        community_name = self.request.query_params.get('community')
+        
+        # Community creators/admins can see all invitations for their communities
+        if community_name:
+            try:
+                community = Community.objects.get(name=community_name)
+                if community.created_by == user:
+                    return CommunityInvitation.objects.filter(
+                        community=community
+                    ).order_by('-created_at')
+            except Community.DoesNotExist:
+                pass
+        
+        # Users see their own received invitations
+        return CommunityInvitation.objects.filter(invitee=user).order_by('-created_at')
+    
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        """Accept a community invitation"""
+        invitation = self.get_object()
+        
+        # Only invitee can accept
+        if invitation.invitee != request.user:
+            raise PermissionDenied("You can only accept invitations sent to you.")
+        
+        if invitation.status != 'pending':
+            return Response({
+                "success": False,
+                "error": "This invitation has already been responded to."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create membership
+        CommunityMember.objects.create(
+            user=invitation.invitee,
+            community=invitation.community,
+            is_approved=True
+        )
+        
+        # Update invitation status
+        invitation.status = 'accepted'
+        invitation.responded_at = timezone.now()
+        invitation.save()
+        
+        return Response({
+            "success": True,
+            "message": "Invitation accepted successfully",
+            "data": CommunityInvitationSerializer(invitation, context={'request': request}).data
+        })
+    
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        """Reject/Decline a community invitation"""
+        invitation = self.get_object()
+        
+        # Only invitee can reject
+        if invitation.invitee != request.user:
+            raise PermissionDenied("You can only reject invitations sent to you.")
+        
+        if invitation.status != 'pending':
+            return Response({
+                "success": False,
+                "error": "This invitation has already been responded to."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Update invitation status
+        invitation.status = 'declined'
+        invitation.responded_at = timezone.now()
+        invitation.save()
+        
+        return Response({
+            "success": True,
+            "message": "Invitation declined",
+            "data": CommunityInvitationSerializer(invitation, context={'request': request}).data
+        })
+
+
+class InviteUserToCommunityView(APIView):
+    """Invite a user to a private community"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        community_name = request.data.get('community')
+        user_id = request.data.get('user_id')
+        message = request.data.get('message', '')
+        
+        if not community_name or not user_id:
+            return Response({
+                "success": False,
+                "error": "community and user_id are required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            community = Community.objects.get(name=community_name)
+        except Community.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Community not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Only creator/admins can invite
+        if community.created_by != request.user:
+            membership = CommunityMember.objects.filter(
+                user=request.user,
+                community=community,
+                is_approved=True
+            ).first()
+            if not (membership and membership.role in ['admin', 'moderator']):
+                raise PermissionDenied("Only community creators and admins can invite users.")
+        
+        # Only private communities can be invited to
+        if community.visibility != 'private':
+            return Response({
+                "success": False,
+                "error": "Only private communities can have invitations"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            invitee = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Check if user is already a member
+        if CommunityMember.objects.filter(user=invitee, community=community, is_approved=True).exists():
+            return Response({
+                "success": False,
+                "error": "User is already a member of this community"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Check if invitation already exists
+        existing_invitation = CommunityInvitation.objects.filter(
+            community=community,
+            invitee=invitee,
+            status='pending'
+        ).first()
+        
+        if existing_invitation:
+            return Response({
+                "success": False,
+                "error": "User already has a pending invitation"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create invitation
+        invitation = CommunityInvitation.objects.create(
+            community=community,
+            inviter=request.user,
+            invitee=invitee,
+            message=message
+        )
+        
+        # Create notification
+        Notification.objects.create(
+            recipient=invitee,
+            sender=request.user,
+            notification_type='community_invite',
+            community=community
+        )
+        
+        return Response({
+            "success": True,
+            "message": "Invitation sent successfully",
+            "data": CommunityInvitationSerializer(invitation, context={'request': request}).data
+        }, status=status.HTTP_201_CREATED)
