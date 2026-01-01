@@ -34,7 +34,8 @@ router.register(r'invitations', CommunityInvitationViewSet, basename='invitation
 router.register(r'chat/rooms', RoomViewSet, basename='chat-room')
 
 urlpatterns = [
-    path("", include(router.urls)),
+    # Community invitation endpoints (must be before router.urls to avoid conflicts)
+    path('communities/invite/', InviteUserToCommunityView.as_view(), name='invite-user-to-community'),
     # Chat user endpoints
     path('chat/users/', ChatUserListView.as_view(), name='chat-users'),
     path('chat/users/search/', ChatUserSearchView.as_view(), name='chat-user-search'),
@@ -49,6 +50,6 @@ urlpatterns = [
     path('chat/report/', ReportUserView.as_view(), name='report-user'),
     path('chat/reports/', UserReportsListView.as_view(), name='user-reports-list'),
     path('chat/reports/<int:report_id>/update/', UpdateReportStatusView.as_view(), name='update-report-status'),
-    # Community invitation endpoints
-    path('communities/invite/', InviteUserToCommunityView.as_view(), name='invite-user-to-community'),
+    # Router URLs (must be last to avoid conflicts with specific paths)
+    path("", include(router.urls)),
 ]

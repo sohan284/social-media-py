@@ -35,7 +35,7 @@ class Community(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     created_by = models.ForeignKey(User, on_delete=models.CASCADE, related_name='created_communities')
     updated_at = models.DateTimeField(auto_now=True)
-    members_count = models.PositiveIntegerField(default=1)
+    members_count = models.PositiveIntegerField(default=0)
     posts_count = models.PositiveIntegerField(default=0)
     
     class Meta:
@@ -111,9 +111,11 @@ class CommunityMember(models.Model):
             super().save(update_fields=['is_approved'])
 
         # Update members count
+        # Since members_count defaults to 0, we increment for all approved members (including creator)
         if is_new and self.is_approved:
             Community.objects.filter(pk=self.community.pk).update(members_count=F('members_count') + 1)
         elif old_approved is False and self.is_approved is True:
+            # Member was just approved
             Community.objects.filter(pk=self.community.pk).update(members_count=F('members_count') + 1)
 
     def delete(self, *args, **kwargs):

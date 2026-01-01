@@ -87,23 +87,29 @@ class PostViewSet(viewsets.ModelViewSet):
             # Determine post status based on moderation and community settings
             if not is_approved:
                 # Auto-reject if moderation fails
-                serializer.save(user=self.request.user, status='rejected')
+                post = serializer.save(user=self.request.user, status='rejected')
                 raise serializers.ValidationError({
                     "content_moderation": rejection_reason
                 })
             elif community.visibility == 'private':
-                serializer.save(user=self.request.user, status='pending')
+                post = serializer.save(user=self.request.user, status='pending')
             else:
-                serializer.save(user=self.request.user)
+                # Public/restricted: post is approved immediately
+                post = serializer.save(user=self.request.user, status='approved')
+                # Refresh post from database to ensure status is correct
+                post.refresh_from_db()
+                # Update posts_count for approved posts (use community from validated_data to ensure it's set)
+                if community and post.status == 'approved':
+                    Community.objects.filter(pk=community.pk).update(posts_count=F('posts_count') + 1)
         else:
             # Personal post - apply moderation
             if not is_approved:
-                serializer.save(user=self.request.user, status='rejected')
+                post = serializer.save(user=self.request.user, status='rejected')
                 raise serializers.ValidationError({
                     "content_moderation": rejection_reason
                 })
             else:
-                serializer.save(user=self.request.user)
+                post = serializer.save(user=self.request.user)
 
 
     def create(self, request, *args, **kwargs):
@@ -147,6 +153,17 @@ class PostViewSet(viewsets.ModelViewSet):
             "data": serializer.data
         })
 
+    def perform_destroy(self, instance):
+        """Update community posts_count when post is deleted"""
+        community = instance.community
+        was_approved = instance.status == 'approved'
+        
+        super().perform_destroy(instance)
+        
+        # Update posts_count if post was approved and had a community
+        if was_approved and community:
+            Community.objects.filter(pk=community.pk).update(posts_count=F('posts_count') - 1)
+    
     def destroy(self, request, *args, **kwargs):
         """Delete post - admin can delete any post, users can only delete their own"""
         post = self.get_object()
@@ -166,6 +183,38 @@ class PostViewSet(viewsets.ModelViewSet):
             "data": None
         }, status=status.HTTP_200_OK)
 
+    def perform_update(self, serializer):
+        """Update post and handle posts_count changes when status changes"""
+        instance = serializer.instance
+        old_status = instance.status if instance.pk else None
+        old_community = instance.community
+        
+        # Save the post
+        super().perform_update(serializer)
+        
+        # Get the updated instance
+        updated_instance = serializer.instance
+        new_status = updated_instance.status
+        new_community = updated_instance.community
+        
+        # Handle posts_count updates when status changes
+        if old_community and old_status != new_status:
+            # Post was approved, now it's not
+            if old_status == 'approved' and new_status != 'approved':
+                Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') - 1)
+            # Post was not approved, now it is
+            elif old_status != 'approved' and new_status == 'approved':
+                Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') + 1)
+        
+        # Handle community change
+        if old_community != new_community:
+            # If old community existed and post was approved, decrease count
+            if old_community and old_status == 'approved':
+                Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') - 1)
+            # If new community exists and post is approved, increase count
+            if new_community and new_status == 'approved':
+                Community.objects.filter(pk=new_community.pk).update(posts_count=F('posts_count') + 1)
+    
     def _calculate_post_score(self, post, user, time_decay_hours=24):
         """
         Calculate engagement score for a post with time decay and personalization
@@ -442,14 +491,23 @@ class PostViewSet(viewsets.ModelViewSet):
                 "error": "Community not found"
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Check if user is a member - ALL communities require membership to view posts
+        # Check if user is a member or has pending invitation
         membership = CommunityMember.objects.filter(
             user=request.user,
             community=community,
             is_approved=True
         ).first()
         
-        if not membership:
+        # For private communities, also check if user has pending invitation
+        has_pending_invitation = False
+        if community.visibility == 'private':
+            has_pending_invitation = CommunityInvitation.objects.filter(
+                invitee=request.user,
+                community=community,
+                status='pending'
+            ).exists()
+        
+        if not membership and not has_pending_invitation:
             return Response({
                 "success": False,
                 "error": "You must be a member of this community to view posts"
@@ -1053,7 +1111,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
         
         return Notification.objects.filter(
             recipient=self.request.user
-        ).select_related('sender', 'post', 'comment').order_by('-created_at')
+        ).select_related('sender', 'post', 'comment', 'community').order_by('-created_at')
     
     def list(self, request, *args, **kwargs):
         """Get all notifications for current user"""
