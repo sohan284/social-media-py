@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from ckeditor.fields import RichTextField
 from community.models import *
+from interest.models import SubCategory
 
 """ Post Models """
 class Post(models.Model):
@@ -35,6 +36,12 @@ class Post(models.Model):
     media_file = models.JSONField(default=list, blank=True, null=True)
     link = models.URLField(blank=True, null=True)
     tags = models.JSONField(default=list, blank=True)
+    subcategories = models.ManyToManyField(
+        SubCategory,
+        related_name='posts',
+        blank=True,
+        help_text='Categories/subcategories this post belongs to'
+    )
     is_pinned = models.BooleanField(default=False, help_text='Pinned posts appear at the top')
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='approved')
     created_at = models.DateTimeField(auto_now_add=True)

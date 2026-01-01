@@ -2,6 +2,7 @@ from rest_framework import serializers
 from .models import *
 from django.core.files.storage import default_storage
 from accounts.models import Profile
+from interest.models import SubCategory
 
 """ Serializers for Posts """
 class LikeSerializer(serializers.ModelSerializer):
@@ -163,15 +164,37 @@ class PostSerializer(serializers.ModelSerializer):
         write_only=True,
         required=False
     )
+    subcategories = serializers.SerializerMethodField()
+    
     class Meta:
         model = Post
         fields = [
             'id', 'user', 'user_name', 'avatar', 'title', 'post_type', 'content', 'media_file', 'media_files', 'link',
-            'tags', 'status', 'created_at', 'updated_at',
+            'tags', 'subcategories', 'status', 'created_at', 'updated_at',
             'likes_count', 'comments_count', 'shares_count', 'comments',
             'can_edit', 'can_delete', 'is_liked', 'community',
         ]
         read_only_fields = ['user', 'likes_count', 'comments_count', 'shares_count', 'created_at', 'updated_at']
+    
+    def get_subcategories(self, obj):
+        """Safely get subcategories - handles case where field doesn't exist yet"""
+        try:
+            # Check if the field exists on the model
+            if hasattr(obj, '_meta') and hasattr(obj._meta, 'get_field'):
+                try:
+                    obj._meta.get_field('subcategories')
+                    # Field exists, try to access it
+                    if hasattr(obj, 'subcategories'):
+                        try:
+                            return [sub.id for sub in obj.subcategories.all()]
+                        except (AttributeError, Exception):
+                            return []
+                except Exception:
+                    # Field doesn't exist in model
+                    return []
+        except Exception:
+            pass
+        return []
 
     def get_avatar(self, obj):
         try:
@@ -181,7 +204,23 @@ class PostSerializer(serializers.ModelSerializer):
         
     def create(self, validated_data):
         media_files = validated_data.pop('media_files', [])
+        # Note: subcategories is now a SerializerMethodField (read-only)
+        # If you need to set subcategories, handle it separately in the view
         post = Post.objects.create(**validated_data)
+        
+        # Try to set subcategories if provided in request data (not validated_data since it's read-only now)
+        request = self.context.get('request')
+        if request and request.data.get('subcategories'):
+            try:
+                subcategory_ids = request.data.get('subcategories', [])
+                if isinstance(subcategory_ids, str):
+                    import json
+                    subcategory_ids = json.loads(subcategory_ids)
+                if hasattr(post, 'subcategories') and subcategory_ids:
+                    post.subcategories.set(subcategory_ids)
+            except Exception:
+                # Field doesn't exist yet or invalid data, skip
+                pass
 
         if media_files:
             file_paths = []
@@ -203,6 +242,22 @@ class PostSerializer(serializers.ModelSerializer):
         # Update other fields
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
+        
+        # Handle subcategories from request data (since SerializerMethodField is read-only)
+        request = self.context.get('request')
+        if request and hasattr(request, 'data'):
+            subcategory_ids = request.data.get('subcategories')
+            if subcategory_ids is not None:
+                try:
+                    # Handle both list and JSON string formats
+                    if isinstance(subcategory_ids, str):
+                        import json
+                        subcategory_ids = json.loads(subcategory_ids)
+                    if isinstance(subcategory_ids, list) and hasattr(instance, 'subcategories'):
+                        instance.subcategories.set(subcategory_ids)
+                except Exception:
+                    # Field doesn't exist yet or invalid data, skip silently
+                    pass
         
         if media_files is not None:
             # Delete old files if needed
@@ -252,11 +307,65 @@ class FollowSerializer(serializers.ModelSerializer):
     """ Serializer for Follow """
     follower_name = serializers.CharField(source='follower.username', read_only=True)
     following_name = serializers.CharField(source='following.username', read_only=True)
+    
+    # Follower profile fields
+    follower_avatar = serializers.SerializerMethodField()
+    follower_about = serializers.SerializerMethodField()
+    
+    # Following profile fields
+    following_avatar = serializers.SerializerMethodField()
+    following_about = serializers.SerializerMethodField()
 
     class Meta:
         model = Follow
-        fields = ['id', 'follower', 'follower_name', 'following', 'following_name', 'created_at']
+        fields = [
+            'id', 'follower', 'follower_name', 'follower_avatar', 'follower_about',
+            'following', 'following_name', 'following_avatar', 'following_about', 
+            'created_at'
+        ]
         read_only_fields = ['follower', 'created_at']
+    
+    def get_follower_avatar(self, obj):
+        """Get follower's avatar URL"""
+        try:
+            if hasattr(obj.follower, 'profile') and obj.follower.profile.avatar:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.follower.profile.avatar.url)
+                return obj.follower.profile.avatar.url
+        except Exception:
+            pass
+        return None
+    
+    def get_follower_about(self, obj):
+        """Get follower's about text"""
+        try:
+            if hasattr(obj.follower, 'profile') and obj.follower.profile.about:
+                return obj.follower.profile.about
+        except Exception:
+            pass
+        return None
+    
+    def get_following_avatar(self, obj):
+        """Get following user's avatar URL"""
+        try:
+            if hasattr(obj.following, 'profile') and obj.following.profile.avatar:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.following.profile.avatar.url)
+                return obj.following.profile.avatar.url
+        except Exception:
+            pass
+        return None
+    
+    def get_following_about(self, obj):
+        """Get following user's about text"""
+        try:
+            if hasattr(obj.following, 'profile') and obj.following.profile.about:
+                return obj.following.profile.about
+        except Exception:
+            pass
+        return None
 
     def validate(self, data):
         # Prevent users from following themselves
