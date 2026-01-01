@@ -291,12 +291,15 @@ class NotificationSerializer(serializers.ModelSerializer):
     """ Serializer for Notification """
     sender_name = serializers.CharField(source='sender.username', read_only=True)
     post_title = serializers.CharField(source='post.title', read_only=True)
+    community_name = serializers.CharField(source='community.name', read_only=True)
+    community_title = serializers.CharField(source='community.title', read_only=True)
     
     class Meta:
         model = Notification
         fields = [
             'id', 'sender', 'sender_name', 'notification_type', 
-            'post', 'post_title', 'comment', 'is_read', 'created_at'
+            'post', 'post_title', 'comment', 'community', 'community_name', 
+            'community_title', 'is_read', 'created_at'
         ]
         read_only_fields = ['sender', 'created_at']
 

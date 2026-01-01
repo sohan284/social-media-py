@@ -33,13 +33,13 @@ class CommunityViewSet(viewsets.ModelViewSet):
         
         user = self.request.user
         
-        if self.action == 'list':
+        if self.action in ['list', 'retrieve']:
             # Show:
             # - Public communities (everyone can see)
             # - Restricted communities (everyone can see, but only approved members can post)
             # - Private communities (only if user is approved member OR has pending invitation)
             # Exclude private communities where user has declined invitation
-            return Community.objects.filter(
+            queryset = Community.objects.filter(
                 Q(visibility='public') | 
                 Q(visibility='restricted') |
                 Q(visibility='private', members__user=user, members__is_approved=True) |
@@ -47,29 +47,35 @@ class CommunityViewSet(viewsets.ModelViewSet):
             ).exclude(
                 Q(visibility='private') & 
                 Q(invitations__invitee=user, invitations__status='declined')
-            ).distinct().annotate(
-                user_is_member=Exists(
-                    CommunityMember.objects.filter(
-                        community=OuterRef('pk'),
-                        user=user,
-                        is_approved=True
+            ).distinct()
+            
+            # Only add annotations for list action
+            if self.action == 'list':
+                queryset = queryset.annotate(
+                    user_is_member=Exists(
+                        CommunityMember.objects.filter(
+                            community=OuterRef('pk'),
+                            user=user,
+                            is_approved=True
+                        )
+                    ),
+                    user_has_pending_request=Exists(
+                        CommunityJoinRequest.objects.filter(
+                            community=OuterRef('pk'),
+                            user=user,
+                            status='pending'
+                        )
+                    ),
+                    user_has_pending_invitation=Exists(
+                        CommunityInvitation.objects.filter(
+                            community=OuterRef('pk'),
+                            invitee=user,
+                            status='pending'
+                        )
                     )
-                ),
-                user_has_pending_request=Exists(
-                    CommunityJoinRequest.objects.filter(
-                        community=OuterRef('pk'),
-                        user=user,
-                        status='pending'
-                    )
-                ),
-                user_has_pending_invitation=Exists(
-                    CommunityInvitation.objects.filter(
-                        community=OuterRef('pk'),
-                        invitee=user,
-                        status='pending'
-                    )
-                )
-            ).order_by('-members_count', '-created_at')
+                ).order_by('-members_count', '-created_at')
+            
+            return queryset
         
         return Community.objects.all()
     
@@ -113,10 +119,17 @@ class CommunityViewSet(viewsets.ModelViewSet):
                 is_approved=True
             ).first()
             
-            if not membership:
+            # Check if user has pending invitation
+            has_pending_invitation = CommunityInvitation.objects.filter(
+                invitee=user,
+                community=instance,
+                status='pending'
+            ).exists()
+            
+            if not membership and not has_pending_invitation:
                 return Response({
                     "success": False,
-                    "error": "You must be an approved member to view this private community"
+                    "error": "You must be an approved member or have a pending invitation to view this private community"
                 }, status=status.HTTP_403_FORBIDDEN)
         
         # For restricted/public, everyone can view
@@ -163,11 +176,15 @@ class CommunityViewSet(viewsets.ModelViewSet):
     def popular(self, request):
         """Get popular communities based on members count"""
         user = request.user
-        # Show public, restricted, and private communities user is member of
+        # Show public, restricted, and private communities user is member of OR has pending invitation
         communities = Community.objects.filter(
             Q(visibility='public') | 
             Q(visibility='restricted') |
-            Q(visibility='private', members__user=user, members__is_approved=True)
+            Q(visibility='private', members__user=user, members__is_approved=True) |
+            Q(visibility='private', invitations__invitee=user, invitations__status='pending')
+        ).exclude(
+            Q(visibility='private') & 
+            Q(invitations__invitee=user, invitations__status='declined')
         ).distinct().order_by('-members_count', '-posts_count')[:20]
         
         page = self.paginate_queryset(communities)
@@ -486,20 +503,41 @@ class CommunityJoinRequestViewSet(viewsets.ModelViewSet):
         user = self.request.user
         community_name = self.request.query_params.get('community')
         
-        # Only creator can see join requests for their communities
+        # Get communities user can manage (creator or admin/moderator)
+        managed_communities = Community.objects.filter(
+            Q(created_by=user) |
+            Q(members__user=user, members__is_approved=True, members__role__in=['admin', 'moderator'])
+        ).distinct()
+        
+        # Creator/admins/moderators can see join requests for their communities
         if community_name:
             try:
                 community = Community.objects.get(name=community_name)
-                # Only creator can view join requests
-                if community.created_by == user:
+                # Check if user can manage this community
+                if community in managed_communities:
                     return CommunityJoinRequest.objects.filter(
                         community=community
                     ).order_by('-created_at')
             except Community.DoesNotExist:
                 pass
         
-        # Users see their own requests
-        return CommunityJoinRequest.objects.filter(user=user).order_by('-created_at')
+        # Combine: user's own requests + requests for communities user can manage
+        return CommunityJoinRequest.objects.filter(
+            Q(user=user) | Q(community__in=managed_communities)
+        ).distinct().order_by('-created_at')
+    
+    def _can_manage_community(self, user, community):
+        """Check if user can manage the community"""
+        if community.created_by == user:
+            return True
+        
+        membership = CommunityMember.objects.filter(
+            user=user,
+            community=community,
+            is_approved=True
+        ).first()
+        
+        return membership and membership.role in ['admin', 'moderator']
     
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
@@ -507,14 +545,8 @@ class CommunityJoinRequestViewSet(viewsets.ModelViewSet):
         join_request = self.get_object()
         community = join_request.community
         
-        # Check permissions
-        membership = CommunityMember.objects.filter(
-            user=request.user,
-            community=community,
-            is_approved=True
-        ).first()
-        
-        if not (membership and membership.role in ['admin', 'moderator']):
+        # Check permissions - creator or admin/moderator
+        if not self._can_manage_community(request.user, community):
             raise PermissionDenied("You do not have permission to approve requests.")
         
         # Create membership
@@ -550,14 +582,8 @@ class CommunityJoinRequestViewSet(viewsets.ModelViewSet):
         join_request = self.get_object()
         community = join_request.community
         
-        # Check permissions
-        membership = CommunityMember.objects.filter(
-            user=request.user,
-            community=community,
-            is_approved=True
-        ).first()
-        
-        if not (membership and membership.role in ['admin', 'moderator']):
+        # Check permissions - creator or admin/moderator
+        if not self._can_manage_community(request.user, community):
             raise PermissionDenied("You do not have permission to reject requests.")
         
         join_request.status = 'rejected'

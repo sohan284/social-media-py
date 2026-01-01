@@ -14,6 +14,8 @@ class CommunitySerializer(serializers.ModelSerializer):
     user_has_pending_request = serializers.SerializerMethodField()
     user_has_pending_invitation = serializers.SerializerMethodField()
     can_view = serializers.SerializerMethodField()
+    members_count = serializers.SerializerMethodField()
+    posts_count = serializers.SerializerMethodField()
     
     class Meta:
         model = Community
@@ -23,7 +25,7 @@ class CommunitySerializer(serializers.ModelSerializer):
             'updated_at', 'members_count', 'posts_count', 'is_member', 
             'user_role', 'can_post', 'can_manage', 'user_has_pending_request', 'user_has_pending_invitation', 'can_view'
         ]
-        read_only_fields = ['created_by', 'members_count', 'posts_count', 'created_at', 'updated_at']
+        read_only_fields = ['created_by', 'created_at', 'updated_at']
     
     def get_is_member(self, obj):
         request = self.context.get('request')
@@ -135,6 +137,15 @@ class CommunitySerializer(serializers.ModelSerializer):
             return is_member or has_invitation
         
         return False
+    
+    def get_members_count(self, obj):
+        """Calculate accurate members count dynamically"""
+        return obj.members.filter(is_approved=True).count()
+    
+    def get_posts_count(self, obj):
+        """Calculate accurate posts count dynamically"""
+        from post.models import Post
+        return Post.objects.filter(community=obj, status='approved').count()
     
     def create(self, validated_data):
         request = self.context.get('request')
