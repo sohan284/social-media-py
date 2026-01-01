@@ -2,7 +2,9 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.views import APIView
 from django.db.models import Q, Count, Exists, OuterRef, Prefetch, Case, When, IntegerField, F
+from django.db import IntegrityError
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from datetime import timedelta
@@ -127,6 +129,14 @@ class PostViewSet(viewsets.ModelViewSet):
         """List posts with pagination support"""
         queryset = self.filter_queryset(self.get_queryset())
         
+        # Filter by status if provided (for admin to get rejected posts, etc.)
+        status_filter = request.query_params.get('status', None)
+        if status_filter:
+            # Only allow status filtering for admin users
+            if hasattr(request.user, 'role') and request.user.role == 'admin':
+                queryset = queryset.filter(status=status_filter)
+            # For non-admin users, ignore status filter and use default queryset behavior
+        
         # Get pagination parameters
         page_size = request.query_params.get('limit', None)
         if page_size:
@@ -150,6 +160,48 @@ class PostViewSet(viewsets.ModelViewSet):
         return Response({
             "success": True,
             "message": "Posts retrieved successfully",
+            "data": serializer.data
+        })
+
+    def retrieve(self, request, *args, **kwargs):
+        """Get a single post by ID"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            "success": True,
+            "message": "Post retrieved successfully",
+            "data": serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Admin action to approve/repost a rejected or pending post (bypasses moderation)"""
+        if not (hasattr(request.user, 'role') and request.user.role == 'admin'):
+            raise PermissionDenied("Only admins can approve posts.")
+        
+        post = self.get_object()
+        old_status = post.status
+        old_community = post.community
+        
+        # Only allow approving rejected or pending posts
+        if old_status not in ['rejected', 'pending']:
+            return Response({
+                "success": False,
+                "message": f"Post is already {old_status}. Only rejected or pending posts can be approved."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Approve the post (bypass moderation)
+        post.status = 'approved'
+        post.save()
+        
+        # Update posts_count if post has a community
+        if old_community and old_status != 'approved':
+            Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') + 1)
+        
+        serializer = self.get_serializer(post)
+        return Response({
+            "success": True,
+            "message": "Post approved and reposted successfully.",
             "data": serializer.data
         })
 
@@ -1344,6 +1396,112 @@ class FollowViewSet(viewsets.ModelViewSet):
             "message": "User profile retrieved successfully",
             "data": serializer.data
         })
+class PostReportViewSet(viewsets.ModelViewSet):
+    """ Viewset for Post Reports """
+    queryset = PostReport.objects.all()
+    serializer_class = PostReportSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'head', 'options', 'patch']
+
+    def get_queryset(self):
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return PostReport.objects.none()
+        
+        user = self.request.user
+        
+        # Admin can see all reports
+        if hasattr(user, 'role') and user.role == 'admin':
+            return PostReport.objects.select_related(
+                'reporter', 'post', 'post__user', 'reviewed_by'
+            ).order_by('-created_at')
+        
+        # Regular users can only see their own reports
+        return PostReport.objects.filter(reporter=user).select_related(
+            'reporter', 'post', 'post__user', 'reviewed_by'
+        ).order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        """List all post reports"""
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response({
+                "success": True,
+                "message": "Post reports retrieved successfully",
+                "data": serializer.data
+            })
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "success": True,
+            "message": "Post reports retrieved successfully",
+            "data": serializer.data
+        })
+
+    def retrieve(self, request, *args, **kwargs):
+        """Get a single post report"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            "success": True,
+            "message": "Post report retrieved successfully",
+            "data": serializer.data
+        })
+
+    def perform_create(self, serializer):
+        serializer.save(reporter=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            self.perform_create(serializer)
+            headers = self.get_success_headers(serializer.data)
+            return Response({
+                "success": True,
+                "message": "Post reported successfully. Our team will review it.",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED, headers=headers)
+        except IntegrityError as e:
+            # Handle duplicate report (race condition or validation bypass)
+            if 'UNIQUE constraint' in str(e) or 'reporter_id' in str(e) and 'post_id' in str(e):
+                return Response({
+                    "success": False,
+                    "message": "You have already reported this post.",
+                    "error": "duplicate_report"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            # Re-raise if it's a different integrity error
+            raise
+
+    @action(detail=True, methods=['patch'])
+    def review(self, request, pk=None):
+        """Admin action to review a report"""
+        if not (hasattr(request.user, 'role') and request.user.role == 'admin'):
+            raise PermissionDenied("Only admins can review reports.")
+        
+        report = self.get_object()
+        new_status = request.data.get('status', 'reviewed')
+        
+        if new_status not in ['reviewed', 'resolved', 'dismissed']:
+            return Response({
+                "success": False,
+                "message": "Invalid status. Must be 'reviewed', 'resolved', or 'dismissed'."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        report.status = new_status
+        report.reviewed_by = request.user
+        report.reviewed_at = timezone.now()
+        report.save()
+        
+        serializer = self.get_serializer(report)
+        return Response({
+            "success": True,
+            "message": f"Report marked as {new_status}",
+            "data": serializer.data
+        })
+
+
 class NotificationViewSet(viewsets.ModelViewSet):
     """ Viewset for Notification """
     queryset = Notification.objects.all()
@@ -1488,4 +1646,62 @@ class NotificationViewSet(viewsets.ModelViewSet):
             "data": None
         }, status=status.HTTP_200_OK)
     
+class UnifiedReportsView(APIView):
+    """Unified view to get both post reports and user reports"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        """Get all reports (post and user) - admin only"""
+        from chats.models import UserReport
+        from chats.serializers import UserReportSerializer
+        
+        user = request.user
+        
+        # Only admin can see all reports
+        if not (hasattr(user, 'role') and user.role == 'admin'):
+            raise PermissionDenied("Only admins can view all reports.")
+        
+        # Get post reports
+        post_reports = PostReport.objects.select_related(
+            'reporter', 'post', 'post__user', 'reviewed_by'
+        ).order_by('-created_at')
+        
+        # Get user reports
+        user_reports = UserReport.objects.select_related(
+            'reporter', 'reported_user', 'reviewed_by'
+        ).order_by('-created_at')
+        
+        # Serialize both
+        post_report_serializer = PostReportSerializer(post_reports, many=True, context={'request': request})
+        user_report_serializer = UserReportSerializer(user_reports, many=True, context={'request': request})
+        
+        # Combine and format
+        all_reports = []
+        
+        # Add post reports with type indicator
+        for report in post_report_serializer.data:
+            all_reports.append({
+                **report,
+                'report_type': 'post',
+                'type_label': 'Post Report'
+            })
+        
+        # Add user reports with type indicator
+        for report in user_report_serializer.data:
+            all_reports.append({
+                **report,
+                'report_type': 'user',
+                'type_label': 'User Report'
+            })
+        
+        # Sort by created_at (newest first)
+        all_reports.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        return Response({
+            "success": True,
+            "message": "All reports retrieved successfully",
+            "data": all_reports,
+            "count": len(all_reports)
+        })
+
 """ End of Viewset for Posts """
