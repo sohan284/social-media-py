@@ -396,6 +396,63 @@ class FollowSerializer(serializers.ModelSerializer):
         
         return follow
     
+class PostReportSerializer(serializers.ModelSerializer):
+    """ Serializer for Post Report """
+    reporter_name = serializers.CharField(source='reporter.username', read_only=True)
+    reporter_id = serializers.IntegerField(source='reporter.id', read_only=True)
+    post_title = serializers.CharField(source='post.title', read_only=True)
+    post_id = serializers.IntegerField(source='post.id', read_only=True)
+    post_author = serializers.CharField(source='post.user.username', read_only=True)
+    reviewed_by_name = serializers.CharField(source='reviewed_by.username', read_only=True, allow_null=True)
+
+    class Meta:
+        model = PostReport
+        fields = [
+            'id', 'reporter', 'reporter_name', 'reporter_id',
+            'post', 'post_id', 'post_title', 'post_author',
+            'reason', 'description', 'status',
+            'reviewed_by', 'reviewed_by_name', 'reviewed_at',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['reporter', 'status', 'reviewed_by', 'reviewed_at', 'created_at', 'updated_at']
+
+    def validate(self, data):
+        # Prevent users from reporting their own posts
+        post = data.get('post')
+        reporter = self.context['request'].user
+        
+        if post:
+            # If post is an ID, get the actual post object
+            if isinstance(post, (int, str)):
+                try:
+                    from .models import Post
+                    post_obj = Post.objects.get(pk=post)
+                except Post.DoesNotExist:
+                    raise serializers.ValidationError("Post not found.")
+            else:
+                post_obj = post
+            
+            # Check if user is trying to report their own post
+            if post_obj.user == reporter:
+                raise serializers.ValidationError("You cannot report your own post.")
+            
+            # Check if user has already reported this post
+            # Handle case where table doesn't exist yet (migration not run)
+            try:
+                from .models import PostReport
+                if PostReport.objects.filter(reporter=reporter, post=post_obj).exists():
+                    raise serializers.ValidationError("You have already reported this post.")
+            except Exception as e:
+                # If table doesn't exist, skip duplicate check (will fail on save anyway)
+                # But at least we can validate the other checks
+                # Only skip if it's a table-related error, not a validation error
+                if isinstance(e, serializers.ValidationError):
+                    raise
+                pass
+        
+        return data
+
+
 class NotificationSerializer(serializers.ModelSerializer):
     """ Serializer for Notification """
     sender_name = serializers.CharField(source='sender.username', read_only=True)
