@@ -2,7 +2,9 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.views import APIView
 from django.db.models import Q, Count, Exists, OuterRef, Prefetch, Case, When, IntegerField, F
+from django.db import IntegrityError
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from datetime import timedelta
@@ -87,23 +89,29 @@ class PostViewSet(viewsets.ModelViewSet):
             # Determine post status based on moderation and community settings
             if not is_approved:
                 # Auto-reject if moderation fails
-                serializer.save(user=self.request.user, status='rejected')
+                post = serializer.save(user=self.request.user, status='rejected')
                 raise serializers.ValidationError({
                     "content_moderation": rejection_reason
                 })
             elif community.visibility == 'private':
-                serializer.save(user=self.request.user, status='pending')
+                post = serializer.save(user=self.request.user, status='pending')
             else:
-                serializer.save(user=self.request.user)
+                # Public/restricted: post is approved immediately
+                post = serializer.save(user=self.request.user, status='approved')
+                # Refresh post from database to ensure status is correct
+                post.refresh_from_db()
+                # Update posts_count for approved posts (use community from validated_data to ensure it's set)
+                if community and post.status == 'approved':
+                    Community.objects.filter(pk=community.pk).update(posts_count=F('posts_count') + 1)
         else:
             # Personal post - apply moderation
             if not is_approved:
-                serializer.save(user=self.request.user, status='rejected')
+                post = serializer.save(user=self.request.user, status='rejected')
                 raise serializers.ValidationError({
                     "content_moderation": rejection_reason
                 })
             else:
-                serializer.save(user=self.request.user)
+                post = serializer.save(user=self.request.user)
 
 
     def create(self, request, *args, **kwargs):
@@ -120,6 +128,14 @@ class PostViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         """List posts with pagination support"""
         queryset = self.filter_queryset(self.get_queryset())
+        
+        # Filter by status if provided (for admin to get rejected posts, etc.)
+        status_filter = request.query_params.get('status', None)
+        if status_filter:
+            # Only allow status filtering for admin users
+            if hasattr(request.user, 'role') and request.user.role == 'admin':
+                queryset = queryset.filter(status=status_filter)
+            # For non-admin users, ignore status filter and use default queryset behavior
         
         # Get pagination parameters
         page_size = request.query_params.get('limit', None)
@@ -147,6 +163,59 @@ class PostViewSet(viewsets.ModelViewSet):
             "data": serializer.data
         })
 
+    def retrieve(self, request, *args, **kwargs):
+        """Get a single post by ID"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            "success": True,
+            "message": "Post retrieved successfully",
+            "data": serializer.data
+        })
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        """Admin action to approve/repost a rejected or pending post (bypasses moderation)"""
+        if not (hasattr(request.user, 'role') and request.user.role == 'admin'):
+            raise PermissionDenied("Only admins can approve posts.")
+        
+        post = self.get_object()
+        old_status = post.status
+        old_community = post.community
+        
+        # Only allow approving rejected or pending posts
+        if old_status not in ['rejected', 'pending']:
+            return Response({
+                "success": False,
+                "message": f"Post is already {old_status}. Only rejected or pending posts can be approved."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Approve the post (bypass moderation)
+        post.status = 'approved'
+        post.save()
+        
+        # Update posts_count if post has a community
+        if old_community and old_status != 'approved':
+            Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') + 1)
+        
+        serializer = self.get_serializer(post)
+        return Response({
+            "success": True,
+            "message": "Post approved and reposted successfully.",
+            "data": serializer.data
+        })
+
+    def perform_destroy(self, instance):
+        """Update community posts_count when post is deleted"""
+        community = instance.community
+        was_approved = instance.status == 'approved'
+        
+        super().perform_destroy(instance)
+        
+        # Update posts_count if post was approved and had a community
+        if was_approved and community:
+            Community.objects.filter(pk=community.pk).update(posts_count=F('posts_count') - 1)
+    
     def destroy(self, request, *args, **kwargs):
         """Delete post - admin can delete any post, users can only delete their own"""
         post = self.get_object()
@@ -166,7 +235,39 @@ class PostViewSet(viewsets.ModelViewSet):
             "data": None
         }, status=status.HTTP_200_OK)
 
-    def _calculate_post_score(self, post, user, time_decay_hours=24):
+    def perform_update(self, serializer):
+        """Update post and handle posts_count changes when status changes"""
+        instance = serializer.instance
+        old_status = instance.status if instance.pk else None
+        old_community = instance.community
+        
+        # Save the post
+        super().perform_update(serializer)
+        
+        # Get the updated instance
+        updated_instance = serializer.instance
+        new_status = updated_instance.status
+        new_community = updated_instance.community
+        
+        # Handle posts_count updates when status changes
+        if old_community and old_status != new_status:
+            # Post was approved, now it's not
+            if old_status == 'approved' and new_status != 'approved':
+                Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') - 1)
+            # Post was not approved, now it is
+            elif old_status != 'approved' and new_status == 'approved':
+                Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') + 1)
+        
+        # Handle community change
+        if old_community != new_community:
+            # If old community existed and post was approved, decrease count
+            if old_community and old_status == 'approved':
+                Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') - 1)
+            # If new community exists and post is approved, increase count
+            if new_community and new_status == 'approved':
+                Community.objects.filter(pk=new_community.pk).update(posts_count=F('posts_count') + 1)
+    
+    def _calculate_post_score(self, post, user, time_decay_hours=24, user_interest_names=None, user_subcategories=None):
         """
         Calculate engagement score for a post with time decay and personalization
         Score = (likes * 1 + comments * 2 + shares * 3) * time_decay * personalization_boost
@@ -197,6 +298,36 @@ class PostViewSet(viewsets.ModelViewSet):
         # Boost if user has interacted with similar content
         if Like.objects.filter(user=user, post__user=post.user).exists():
             personalization *= 1.3
+        
+        # Category/Interest matching boost - Direct subcategory matching
+        if user_subcategories:
+            try:
+                # Get post subcategories (check if field exists - migration might not be run yet)
+                if hasattr(post, 'subcategories'):
+                    try:
+                        post_subcategories = list(post.subcategories.all())
+                        if post_subcategories:
+                            # Check if any post subcategory matches user interests
+                            matching_subcategories = [sub for sub in post_subcategories if sub in user_subcategories]
+                            if matching_subcategories:
+                                # Boost score based on number of matching subcategories
+                                interest_boost = 1.0 + (len(matching_subcategories) * 0.8)  # 1.8x for 1 match, 2.6x for 2 matches, etc.
+                                personalization *= interest_boost
+                    except (AttributeError, Exception):
+                        # If subcategories field doesn't exist yet (migration not run), skip this check
+                        pass
+            except Exception:
+                # If any error occurs, skip this check
+                pass
+        
+        # Also check tag-based matching as fallback
+        if user_interest_names and post.tags:
+            post_tags_lower = [tag.lower() if isinstance(tag, str) else str(tag).lower() for tag in post.tags]
+            matching_interests = [interest for interest in user_interest_names if interest in post_tags_lower or any(interest in tag for tag in post_tags_lower)]
+            if matching_interests:
+                # Smaller boost for tag matching (since subcategory matching is primary)
+                interest_boost = 1.0 + (len(matching_interests) * 0.3)  # 1.3x for 1 match, 1.6x for 2 matches, etc.
+                personalization *= interest_boost
         
         # Pinned posts get extra boost
         if post.is_pinned:
@@ -234,6 +365,22 @@ class PostViewSet(viewsets.ModelViewSet):
             user=user, is_approved=True
         ).values_list('community_id', flat=True))
         
+        # Get user's interests/subcategories for category-based filtering
+        user_subcategories = []
+        user_interest_names = []
+        if hasattr(user, 'profile') and user.profile:
+            user_subcategories = list(user.profile.subcategories.all())
+            user_interest_names = [sub.name.lower() for sub in user_subcategories]
+            # Also include category names
+            user_interest_names.extend([sub.category.name.lower() for sub in user_subcategories])
+        
+        # Detect if user is new (no follows, no communities, no interests)
+        is_new_user = (
+            len(following_ids) == 0 and 
+            len(joined_community_ids) == 0 and 
+            len(user_subcategories) == 0
+        )
+        
         # Get recently viewed posts
         recent_views_date = timezone.now() - timedelta(hours=12)
         recently_viewed_ids = list(PostView.objects.filter(
@@ -251,13 +398,45 @@ class PostViewSet(viewsets.ModelViewSet):
         # Convert to list with slice to avoid subquery LIMIT issue
         public_community_ids = list(public_community_query.values_list('id', flat=True)[:50])
         
-        # Base queryset - all approved posts from last 30 days
+        # For new users, extend time window to show older popular posts
+        if is_new_user:
+            # Extended time window for new users - last 180 days
+            time_window_days = 180
+        else:
+            # Regular time window - last 30 days
+            time_window_days = 30
+        
+        # Base queryset - all approved posts from extended time window
+        # Check if subcategories table exists (migration might not be run yet)
+        prefetch_fields = ['likes', 'comments', 'shares']
+        
+        # Test if subcategories table exists by trying a simple query
+        # This works for SQLite, PostgreSQL, and MySQL
+        try:
+            from django.db import connection
+            db_backend = connection.vendor
+            with connection.cursor() as cursor:
+                if db_backend == 'sqlite':
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_post_subcategories'")
+                elif db_backend == 'postgresql':
+                    cursor.execute("SELECT tablename FROM pg_tables WHERE tablename='post_post_subcategories'")
+                elif db_backend == 'mysql':
+                    cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_name='post_post_subcategories'")
+                else:
+                    # For other databases, try to access the field directly
+                    raise Exception("Unknown database backend")
+                
+                table_exists = cursor.fetchone() is not None
+                if table_exists:
+                    prefetch_fields.append('subcategories')
+        except Exception:
+            # If we can't check or table doesn't exist, skip subcategories
+            pass
+        
         base_posts = Post.objects.filter(
             status='approved',
-            created_at__gte=timezone.now() - timedelta(days=30)
-        ).select_related('user', 'community').prefetch_related(
-            'likes', 'comments', 'shares'
-        )
+            created_at__gte=timezone.now() - timedelta(days=time_window_days)
+        ).select_related('user', 'community').prefetch_related(*prefetch_fields)
         
         # POOL 1: Posts from followed users (personal posts)
         followed_posts = base_posts.filter(
@@ -301,25 +480,156 @@ class PostViewSet(viewsets.ModelViewSet):
         if recently_viewed_ids:
             fresh_posts = fresh_posts.exclude(id__in=recently_viewed_ids)
         
-        # Annotate all querysets with engagement score
-        followed_posts = followed_posts.annotate(
-            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
-        )
-        community_posts = community_posts.annotate(
-            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
-        )
-        fresh_posts = fresh_posts.annotate(
-            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
-        )
+        # NEW USER SPECIAL POOLS: For users with no follows/communities/interests
+        all_time_popular_posts = []
+        time_diverse_posts = []
         
-        # Combine all pools - execute queries and convert to lists
-        all_candidate_posts = (
-            list(followed_posts) + 
-            list(community_posts) + 
-            list(discovery_community_posts) + 
-            list(discovery_personal_posts) +
-            list(fresh_posts)
-        )
+        if is_new_user:
+            # POOL 6: All-time popular posts (from extended time window)
+            # Get posts with high engagement from different time periods
+            all_time_base = Post.objects.filter(
+                status='approved',
+                created_at__gte=timezone.now() - timedelta(days=time_window_days)
+            ).select_related('user', 'community').prefetch_related(*prefetch_fields)
+            
+            # High engagement posts from different time periods
+            # Recent (last 7 days)
+            recent_popular = all_time_base.filter(
+                created_at__gte=recent_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=5).order_by('-engagement_score')[:20]
+            
+            # Week to month old (7-30 days)
+            week_old_date = timezone.now() - timedelta(days=30)
+            week_old_popular = all_time_base.filter(
+                created_at__gte=week_old_date,
+                created_at__lt=recent_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=10).order_by('-engagement_score')[:15]
+            
+            # Month to 3 months old (30-90 days)
+            month_old_date = timezone.now() - timedelta(days=90)
+            month_old_popular = all_time_base.filter(
+                created_at__gte=month_old_date,
+                created_at__lt=week_old_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=15).order_by('-engagement_score')[:10]
+            
+            # Older posts (90-180 days) - only very popular ones
+            older_popular = all_time_base.filter(
+                created_at__gte=timezone.now() - timedelta(days=time_window_days),
+                created_at__lt=month_old_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=20).order_by('-engagement_score')[:5]
+            
+            # Combine time-diverse popular posts (safely convert querysets to lists)
+            try:
+                all_time_popular_posts = (
+                    list(recent_popular) + 
+                    list(week_old_popular) + 
+                    list(month_old_popular) + 
+                    list(older_popular)
+                )
+            except Exception:
+                all_time_popular_posts = []
+            
+            # POOL 7: Diverse time periods - mix of recent and older posts
+            # Get posts from different time buckets
+            time_buckets = [
+                (fresh_date, timezone.now()),  # Last 24 hours
+                (recent_date, fresh_date),     # 1-7 days
+                (week_old_date, recent_date),  # 7-30 days
+                (month_old_date, week_old_date), # 30-90 days
+            ]
+            
+            time_diverse_list = []
+            try:
+                for start_date, end_date in time_buckets:
+                    try:
+                        bucket_posts = all_time_base.filter(
+                            created_at__gte=start_date,
+                            created_at__lt=end_date
+                        ).annotate(
+                            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+                        ).order_by('-engagement_score')[:10]
+                        time_diverse_list.extend(list(bucket_posts))
+                    except Exception:
+                        # Skip this bucket if there's an error
+                        continue
+            except Exception:
+                pass
+            
+            time_diverse_posts = time_diverse_list
+        
+        # Annotate all querysets with engagement score
+        # Use try-except to handle cases where queryset evaluation fails due to missing tables
+        try:
+            if following_ids:
+                followed_posts = followed_posts.annotate(
+                    engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+                )
+        except Exception:
+            followed_posts = Post.objects.none()
+        
+        try:
+            if joined_community_ids:
+                community_posts = community_posts.annotate(
+                    engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+                )
+        except Exception:
+            community_posts = Post.objects.none()
+        
+        try:
+            fresh_posts = fresh_posts.annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            )
+        except Exception:
+            fresh_posts = Post.objects.none()
+        
+        # Combine all pools - execute queries and convert to lists (with error handling)
+        all_candidate_posts = []
+        try:
+            if following_ids:
+                all_candidate_posts.extend(list(followed_posts))
+        except Exception:
+            pass
+        
+        try:
+            if joined_community_ids:
+                all_candidate_posts.extend(list(community_posts))
+        except Exception:
+            pass
+        
+        try:
+            if public_community_ids:
+                all_candidate_posts.extend(list(discovery_community_posts))
+        except Exception:
+            pass
+        
+        try:
+            all_candidate_posts.extend(list(discovery_personal_posts))
+        except Exception:
+            pass
+        
+        try:
+            all_candidate_posts.extend(list(fresh_posts))
+        except Exception:
+            pass
+        
+        # Add new user special pools if applicable
+        if is_new_user:
+            try:
+                all_candidate_posts.extend(all_time_popular_posts)
+            except Exception:
+                pass
+            try:
+                all_candidate_posts.extend(time_diverse_posts)
+            except Exception:
+                pass
         
         # Remove duplicates by post ID
         seen_ids = set()
@@ -329,11 +639,16 @@ class PostViewSet(viewsets.ModelViewSet):
                 seen_ids.add(post.id)
                 unique_posts.append(post)
         
-        # Calculate personalized scores for all posts
+        # Calculate personalized scores for all posts (with category matching)
         scored_posts = []
         for post in unique_posts:
-            score = self._calculate_post_score(post, user)
-            scored_posts.append((post, score))
+            try:
+                score = self._calculate_post_score(post, user, user_interest_names=user_interest_names, user_subcategories=user_subcategories)
+                scored_posts.append((post, score))
+            except Exception as e:
+                # Skip posts that cause errors in score calculation
+                # Use a default low score to still include them if needed
+                scored_posts.append((post, 0.1))
         
         # Sort by score
         scored_posts.sort(key=lambda x: x[1], reverse=True)
@@ -356,13 +671,23 @@ class PostViewSet(viewsets.ModelViewSet):
         low_engagement = scored_posts[medium_tier_end:]
         
         # Sample from each tier with randomization
-        feed_size = 50  # Target feed size
+        # New users get larger feed to explore content
+        feed_size = 80 if is_new_user else 50
         
         # Allocate posts per tier (with variation)
-        high_count = min(len(high_engagement), int(feed_size * 0.4))
-        medium_count = min(len(medium_engagement), int(feed_size * 0.3))
-        fresh_count = min(len(low_engagement), int(feed_size * 0.2))
-        random_count = min(total_posts, int(feed_size * 0.1))
+        # New users get more diverse time distribution
+        if is_new_user:
+            # 30% high engagement, 25% medium, 25% diverse time periods, 20% fresh
+            high_count = min(len(high_engagement), int(feed_size * 0.3))
+            medium_count = min(len(medium_engagement), int(feed_size * 0.25))
+            fresh_count = min(len(low_engagement), int(feed_size * 0.25))
+            random_count = min(total_posts, int(feed_size * 0.2))
+        else:
+            # Regular users: 40% high, 30% medium, 20% fresh, 10% random
+            high_count = min(len(high_engagement), int(feed_size * 0.4))
+            medium_count = min(len(medium_engagement), int(feed_size * 0.3))
+            fresh_count = min(len(low_engagement), int(feed_size * 0.2))
+            random_count = min(total_posts, int(feed_size * 0.1))
         
         # Random sampling within each tier (KEY FOR REFRESH VARIATION)
         selected_posts = []
@@ -398,30 +723,48 @@ class PostViewSet(viewsets.ModelViewSet):
         final_feed = pinned_posts + non_pinned
         
         # Record views for the posts being shown
-        views_to_create = [
-            PostView(user=user, post=post)
-            for post in final_feed[:20]  # Record views for first 20 posts
-            if not PostView.objects.filter(user=user, post=post).exists()
-        ]
-        if views_to_create:
-            PostView.objects.bulk_create(views_to_create, ignore_conflicts=True)
+        try:
+            views_to_create = [
+                PostView(user=user, post=post)
+                for post in final_feed[:20]  # Record views for first 20 posts
+                if not PostView.objects.filter(user=user, post=post).exists()
+            ]
+            if views_to_create:
+                PostView.objects.bulk_create(views_to_create, ignore_conflicts=True)
+        except Exception:
+            # If PostView model doesn't exist or there's an error, skip view tracking
+            pass
         
         # Paginate
-        page = self.paginate_queryset(final_feed)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response({
+        try:
+            page = self.paginate_queryset(final_feed)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True, context={'request': request})
+                return self.get_paginated_response({
+                    "success": True,
+                    "message": "News feed retrieved successfully",
+                    "data": serializer.data
+                })
+            
+            serializer = self.get_serializer(final_feed, many=True, context={'request': request})
+            return Response({
                 "success": True,
                 "message": "News feed retrieved successfully",
                 "data": serializer.data
             })
-        
-        serializer = self.get_serializer(final_feed, many=True)
-        return Response({
-            "success": True,
-            "message": "News feed retrieved successfully",
-            "data": serializer.data
-        })
+        except Exception as e:
+            # Log the error for debugging
+            import traceback
+            import sys
+            error_type, error_value, error_traceback = sys.exc_info()
+            print(f"Error in news_feed: {error_type.__name__}: {error_value}")
+            traceback.print_exc()
+            # Return empty feed if serialization fails
+            return Response({
+                "success": False,
+                "message": f"Error retrieving news feed: {str(e)}",
+                "data": []
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['get'])
     def community_posts(self, request):
@@ -442,14 +785,23 @@ class PostViewSet(viewsets.ModelViewSet):
                 "error": "Community not found"
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Check if user is a member - ALL communities require membership to view posts
+        # Check if user is a member or has pending invitation
         membership = CommunityMember.objects.filter(
             user=request.user,
             community=community,
             is_approved=True
         ).first()
         
-        if not membership:
+        # For private communities, also check if user has pending invitation
+        has_pending_invitation = False
+        if community.visibility == 'private':
+            has_pending_invitation = CommunityInvitation.objects.filter(
+                invitee=request.user,
+                community=community,
+                status='pending'
+            ).exists()
+        
+        if not membership and not has_pending_invitation:
             return Response({
                 "success": False,
                 "error": "You must be a member of this community to view posts"
@@ -883,7 +1235,13 @@ class FollowViewSet(viewsets.ModelViewSet):
             # Default: show who current user is following
             queryset = queryset.filter(follower=self.request.user)
         
-        return queryset.select_related('follower', 'following').order_by('-created_at')
+        # Prefetch profile data to avoid N+1 queries
+        return queryset.select_related(
+            'follower', 
+            'follower__profile',
+            'following', 
+            'following__profile'
+        ).order_by('-created_at')
 
     def perform_create(self, serializer):
         serializer.save(follower=self.request.user)
@@ -1038,6 +1396,112 @@ class FollowViewSet(viewsets.ModelViewSet):
             "message": "User profile retrieved successfully",
             "data": serializer.data
         })
+class PostReportViewSet(viewsets.ModelViewSet):
+    """ Viewset for Post Reports """
+    queryset = PostReport.objects.all()
+    serializer_class = PostReportSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    http_method_names = ['get', 'post', 'head', 'options', 'patch']
+
+    def get_queryset(self):
+        # Handle Swagger schema generation
+        if getattr(self, 'swagger_fake_view', False):
+            return PostReport.objects.none()
+        
+        user = self.request.user
+        
+        # Admin can see all reports
+        if hasattr(user, 'role') and user.role == 'admin':
+            return PostReport.objects.select_related(
+                'reporter', 'post', 'post__user', 'reviewed_by'
+            ).order_by('-created_at')
+        
+        # Regular users can only see their own reports
+        return PostReport.objects.filter(reporter=user).select_related(
+            'reporter', 'post', 'post__user', 'reviewed_by'
+        ).order_by('-created_at')
+
+    def list(self, request, *args, **kwargs):
+        """List all post reports"""
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response({
+                "success": True,
+                "message": "Post reports retrieved successfully",
+                "data": serializer.data
+            })
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "success": True,
+            "message": "Post reports retrieved successfully",
+            "data": serializer.data
+        })
+
+    def retrieve(self, request, *args, **kwargs):
+        """Get a single post report"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            "success": True,
+            "message": "Post report retrieved successfully",
+            "data": serializer.data
+        })
+
+    def perform_create(self, serializer):
+        serializer.save(reporter=self.request.user)
+
+    def create(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            self.perform_create(serializer)
+            headers = self.get_success_headers(serializer.data)
+            return Response({
+                "success": True,
+                "message": "Post reported successfully. Our team will review it.",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED, headers=headers)
+        except IntegrityError as e:
+            # Handle duplicate report (race condition or validation bypass)
+            if 'UNIQUE constraint' in str(e) or 'reporter_id' in str(e) and 'post_id' in str(e):
+                return Response({
+                    "success": False,
+                    "message": "You have already reported this post.",
+                    "error": "duplicate_report"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            # Re-raise if it's a different integrity error
+            raise
+
+    @action(detail=True, methods=['patch'])
+    def review(self, request, pk=None):
+        """Admin action to review a report"""
+        if not (hasattr(request.user, 'role') and request.user.role == 'admin'):
+            raise PermissionDenied("Only admins can review reports.")
+        
+        report = self.get_object()
+        new_status = request.data.get('status', 'reviewed')
+        
+        if new_status not in ['reviewed', 'resolved', 'dismissed']:
+            return Response({
+                "success": False,
+                "message": "Invalid status. Must be 'reviewed', 'resolved', or 'dismissed'."
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        report.status = new_status
+        report.reviewed_by = request.user
+        report.reviewed_at = timezone.now()
+        report.save()
+        
+        serializer = self.get_serializer(report)
+        return Response({
+            "success": True,
+            "message": f"Report marked as {new_status}",
+            "data": serializer.data
+        })
+
+
 class NotificationViewSet(viewsets.ModelViewSet):
     """ Viewset for Notification """
     queryset = Notification.objects.all()
@@ -1053,7 +1517,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
         
         return Notification.objects.filter(
             recipient=self.request.user
-        ).select_related('sender', 'post', 'comment').order_by('-created_at')
+        ).select_related('sender', 'post', 'comment', 'community').order_by('-created_at')
     
     def list(self, request, *args, **kwargs):
         """Get all notifications for current user"""
@@ -1182,4 +1646,62 @@ class NotificationViewSet(viewsets.ModelViewSet):
             "data": None
         }, status=status.HTTP_200_OK)
     
+class UnifiedReportsView(APIView):
+    """Unified view to get both post reports and user reports"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        """Get all reports (post and user) - admin only"""
+        from chats.models import UserReport
+        from chats.serializers import UserReportSerializer
+        
+        user = request.user
+        
+        # Only admin can see all reports
+        if not (hasattr(user, 'role') and user.role == 'admin'):
+            raise PermissionDenied("Only admins can view all reports.")
+        
+        # Get post reports
+        post_reports = PostReport.objects.select_related(
+            'reporter', 'post', 'post__user', 'reviewed_by'
+        ).order_by('-created_at')
+        
+        # Get user reports
+        user_reports = UserReport.objects.select_related(
+            'reporter', 'reported_user', 'reviewed_by'
+        ).order_by('-created_at')
+        
+        # Serialize both
+        post_report_serializer = PostReportSerializer(post_reports, many=True, context={'request': request})
+        user_report_serializer = UserReportSerializer(user_reports, many=True, context={'request': request})
+        
+        # Combine and format
+        all_reports = []
+        
+        # Add post reports with type indicator
+        for report in post_report_serializer.data:
+            all_reports.append({
+                **report,
+                'report_type': 'post',
+                'type_label': 'Post Report'
+            })
+        
+        # Add user reports with type indicator
+        for report in user_report_serializer.data:
+            all_reports.append({
+                **report,
+                'report_type': 'user',
+                'type_label': 'User Report'
+            })
+        
+        # Sort by created_at (newest first)
+        all_reports.sort(key=lambda x: x.get('created_at', ''), reverse=True)
+        
+        return Response({
+            "success": True,
+            "message": "All reports retrieved successfully",
+            "data": all_reports,
+            "count": len(all_reports)
+        })
+
 """ End of Viewset for Posts """

@@ -19,6 +19,7 @@ router.register(r'comments', CommentViewSet, basename='comment')
 router.register(r'shares', ShareViewSet, basename='share')
 router.register(r'follows', FollowViewSet, basename='follow')
 router.register(r'notifications', NotificationViewSet, basename='notification')
+router.register(r'post-reports', PostReportViewSet, basename='post-report')
 
 """ Marketplace Section """
 router.register(r'marketplace/categories', MarketplaceCategoryViewSet, basename="marketplace-category")
@@ -34,7 +35,8 @@ router.register(r'invitations', CommunityInvitationViewSet, basename='invitation
 router.register(r'chat/rooms', RoomViewSet, basename='chat-room')
 
 urlpatterns = [
-    path("", include(router.urls)),
+    # Community invitation endpoints (must be before router.urls to avoid conflicts)
+    path('communities/invite/', InviteUserToCommunityView.as_view(), name='invite-user-to-community'),
     # Chat user endpoints
     path('chat/users/', ChatUserListView.as_view(), name='chat-users'),
     path('chat/users/search/', ChatUserSearchView.as_view(), name='chat-user-search'),
@@ -49,6 +51,8 @@ urlpatterns = [
     path('chat/report/', ReportUserView.as_view(), name='report-user'),
     path('chat/reports/', UserReportsListView.as_view(), name='user-reports-list'),
     path('chat/reports/<int:report_id>/update/', UpdateReportStatusView.as_view(), name='update-report-status'),
-    # Community invitation endpoints
-    path('communities/invite/', InviteUserToCommunityView.as_view(), name='invite-user-to-community'),
+    # Unified reports endpoint (must import UnifiedReportsView from post.views)
+    path('reports/all/', UnifiedReportsView.as_view(), name='unified-reports'),
+    # Router URLs (must be last to avoid conflicts with specific paths)
+    path("", include(router.urls)),
 ]

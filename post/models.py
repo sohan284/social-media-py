@@ -2,6 +2,7 @@ from django.db import models
 from django.conf import settings
 from ckeditor.fields import RichTextField
 from community.models import *
+from interest.models import SubCategory
 
 """ Post Models """
 class Post(models.Model):
@@ -35,6 +36,12 @@ class Post(models.Model):
     media_file = models.JSONField(default=list, blank=True, null=True)
     link = models.URLField(blank=True, null=True)
     tags = models.JSONField(default=list, blank=True)
+    subcategories = models.ManyToManyField(
+        SubCategory,
+        related_name='posts',
+        blank=True,
+        help_text='Categories/subcategories this post belongs to'
+    )
     is_pinned = models.BooleanField(default=False, help_text='Pinned posts appear at the top')
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='approved')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -210,5 +217,63 @@ class PostView(models.Model):
 
     def __str__(self):
         return f"{self.user.username} viewed {self.post.title}"
+
+
+class PostReport(models.Model):
+    """ Post Report model for reporting inappropriate posts """
+    REASON_CHOICES = [
+        ('spam', 'Spam'),
+        ('harassment', 'Harassment'),
+        ('hate_speech', 'Hate Speech'),
+        ('violence', 'Violence'),
+        ('misinformation', 'Misinformation'),
+        ('copyright', 'Copyright Violation'),
+        ('inappropriate_content', 'Inappropriate Content'),
+        ('other', 'Other'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('reviewed', 'Reviewed'),
+        ('resolved', 'Resolved'),
+        ('dismissed', 'Dismissed'),
+    ]
+    
+    reporter = models.ForeignKey(
+        settings.AUTH_USER_MODEL, 
+        on_delete=models.CASCADE, 
+        related_name='reported_posts'
+    )
+    post = models.ForeignKey(
+        Post, 
+        on_delete=models.CASCADE, 
+        related_name='reports'
+    )
+    reason = models.CharField(max_length=50, choices=REASON_CHOICES)
+    description = models.TextField(blank=True, null=True, help_text='Additional details about the report')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='pending')
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='reviewed_reports',
+        help_text='Admin who reviewed this report'
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('reporter', 'post')  # Prevent duplicate reports from same user
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['post', '-created_at']),
+            models.Index(fields=['reporter', '-created_at']),
+            models.Index(fields=['status', '-created_at']),
+        ]
+
+    def __str__(self):
+        return f"Report by {self.reporter.username} on {self.post.title} - {self.reason}"
     
 """ End of Post Models """
