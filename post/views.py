@@ -215,7 +215,7 @@ class PostViewSet(viewsets.ModelViewSet):
             if new_community and new_status == 'approved':
                 Community.objects.filter(pk=new_community.pk).update(posts_count=F('posts_count') + 1)
     
-    def _calculate_post_score(self, post, user, time_decay_hours=24):
+    def _calculate_post_score(self, post, user, time_decay_hours=24, user_interest_names=None, user_subcategories=None):
         """
         Calculate engagement score for a post with time decay and personalization
         Score = (likes * 1 + comments * 2 + shares * 3) * time_decay * personalization_boost
@@ -246,6 +246,36 @@ class PostViewSet(viewsets.ModelViewSet):
         # Boost if user has interacted with similar content
         if Like.objects.filter(user=user, post__user=post.user).exists():
             personalization *= 1.3
+        
+        # Category/Interest matching boost - Direct subcategory matching
+        if user_subcategories:
+            try:
+                # Get post subcategories (check if field exists - migration might not be run yet)
+                if hasattr(post, 'subcategories'):
+                    try:
+                        post_subcategories = list(post.subcategories.all())
+                        if post_subcategories:
+                            # Check if any post subcategory matches user interests
+                            matching_subcategories = [sub for sub in post_subcategories if sub in user_subcategories]
+                            if matching_subcategories:
+                                # Boost score based on number of matching subcategories
+                                interest_boost = 1.0 + (len(matching_subcategories) * 0.8)  # 1.8x for 1 match, 2.6x for 2 matches, etc.
+                                personalization *= interest_boost
+                    except (AttributeError, Exception):
+                        # If subcategories field doesn't exist yet (migration not run), skip this check
+                        pass
+            except Exception:
+                # If any error occurs, skip this check
+                pass
+        
+        # Also check tag-based matching as fallback
+        if user_interest_names and post.tags:
+            post_tags_lower = [tag.lower() if isinstance(tag, str) else str(tag).lower() for tag in post.tags]
+            matching_interests = [interest for interest in user_interest_names if interest in post_tags_lower or any(interest in tag for tag in post_tags_lower)]
+            if matching_interests:
+                # Smaller boost for tag matching (since subcategory matching is primary)
+                interest_boost = 1.0 + (len(matching_interests) * 0.3)  # 1.3x for 1 match, 1.6x for 2 matches, etc.
+                personalization *= interest_boost
         
         # Pinned posts get extra boost
         if post.is_pinned:
@@ -283,6 +313,22 @@ class PostViewSet(viewsets.ModelViewSet):
             user=user, is_approved=True
         ).values_list('community_id', flat=True))
         
+        # Get user's interests/subcategories for category-based filtering
+        user_subcategories = []
+        user_interest_names = []
+        if hasattr(user, 'profile') and user.profile:
+            user_subcategories = list(user.profile.subcategories.all())
+            user_interest_names = [sub.name.lower() for sub in user_subcategories]
+            # Also include category names
+            user_interest_names.extend([sub.category.name.lower() for sub in user_subcategories])
+        
+        # Detect if user is new (no follows, no communities, no interests)
+        is_new_user = (
+            len(following_ids) == 0 and 
+            len(joined_community_ids) == 0 and 
+            len(user_subcategories) == 0
+        )
+        
         # Get recently viewed posts
         recent_views_date = timezone.now() - timedelta(hours=12)
         recently_viewed_ids = list(PostView.objects.filter(
@@ -300,13 +346,45 @@ class PostViewSet(viewsets.ModelViewSet):
         # Convert to list with slice to avoid subquery LIMIT issue
         public_community_ids = list(public_community_query.values_list('id', flat=True)[:50])
         
-        # Base queryset - all approved posts from last 30 days
+        # For new users, extend time window to show older popular posts
+        if is_new_user:
+            # Extended time window for new users - last 180 days
+            time_window_days = 180
+        else:
+            # Regular time window - last 30 days
+            time_window_days = 30
+        
+        # Base queryset - all approved posts from extended time window
+        # Check if subcategories table exists (migration might not be run yet)
+        prefetch_fields = ['likes', 'comments', 'shares']
+        
+        # Test if subcategories table exists by trying a simple query
+        # This works for SQLite, PostgreSQL, and MySQL
+        try:
+            from django.db import connection
+            db_backend = connection.vendor
+            with connection.cursor() as cursor:
+                if db_backend == 'sqlite':
+                    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='post_post_subcategories'")
+                elif db_backend == 'postgresql':
+                    cursor.execute("SELECT tablename FROM pg_tables WHERE tablename='post_post_subcategories'")
+                elif db_backend == 'mysql':
+                    cursor.execute("SELECT table_name FROM information_schema.tables WHERE table_name='post_post_subcategories'")
+                else:
+                    # For other databases, try to access the field directly
+                    raise Exception("Unknown database backend")
+                
+                table_exists = cursor.fetchone() is not None
+                if table_exists:
+                    prefetch_fields.append('subcategories')
+        except Exception:
+            # If we can't check or table doesn't exist, skip subcategories
+            pass
+        
         base_posts = Post.objects.filter(
             status='approved',
-            created_at__gte=timezone.now() - timedelta(days=30)
-        ).select_related('user', 'community').prefetch_related(
-            'likes', 'comments', 'shares'
-        )
+            created_at__gte=timezone.now() - timedelta(days=time_window_days)
+        ).select_related('user', 'community').prefetch_related(*prefetch_fields)
         
         # POOL 1: Posts from followed users (personal posts)
         followed_posts = base_posts.filter(
@@ -350,25 +428,156 @@ class PostViewSet(viewsets.ModelViewSet):
         if recently_viewed_ids:
             fresh_posts = fresh_posts.exclude(id__in=recently_viewed_ids)
         
-        # Annotate all querysets with engagement score
-        followed_posts = followed_posts.annotate(
-            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
-        )
-        community_posts = community_posts.annotate(
-            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
-        )
-        fresh_posts = fresh_posts.annotate(
-            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
-        )
+        # NEW USER SPECIAL POOLS: For users with no follows/communities/interests
+        all_time_popular_posts = []
+        time_diverse_posts = []
         
-        # Combine all pools - execute queries and convert to lists
-        all_candidate_posts = (
-            list(followed_posts) + 
-            list(community_posts) + 
-            list(discovery_community_posts) + 
-            list(discovery_personal_posts) +
-            list(fresh_posts)
-        )
+        if is_new_user:
+            # POOL 6: All-time popular posts (from extended time window)
+            # Get posts with high engagement from different time periods
+            all_time_base = Post.objects.filter(
+                status='approved',
+                created_at__gte=timezone.now() - timedelta(days=time_window_days)
+            ).select_related('user', 'community').prefetch_related(*prefetch_fields)
+            
+            # High engagement posts from different time periods
+            # Recent (last 7 days)
+            recent_popular = all_time_base.filter(
+                created_at__gte=recent_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=5).order_by('-engagement_score')[:20]
+            
+            # Week to month old (7-30 days)
+            week_old_date = timezone.now() - timedelta(days=30)
+            week_old_popular = all_time_base.filter(
+                created_at__gte=week_old_date,
+                created_at__lt=recent_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=10).order_by('-engagement_score')[:15]
+            
+            # Month to 3 months old (30-90 days)
+            month_old_date = timezone.now() - timedelta(days=90)
+            month_old_popular = all_time_base.filter(
+                created_at__gte=month_old_date,
+                created_at__lt=week_old_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=15).order_by('-engagement_score')[:10]
+            
+            # Older posts (90-180 days) - only very popular ones
+            older_popular = all_time_base.filter(
+                created_at__gte=timezone.now() - timedelta(days=time_window_days),
+                created_at__lt=month_old_date
+            ).annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            ).filter(engagement_score__gte=20).order_by('-engagement_score')[:5]
+            
+            # Combine time-diverse popular posts (safely convert querysets to lists)
+            try:
+                all_time_popular_posts = (
+                    list(recent_popular) + 
+                    list(week_old_popular) + 
+                    list(month_old_popular) + 
+                    list(older_popular)
+                )
+            except Exception:
+                all_time_popular_posts = []
+            
+            # POOL 7: Diverse time periods - mix of recent and older posts
+            # Get posts from different time buckets
+            time_buckets = [
+                (fresh_date, timezone.now()),  # Last 24 hours
+                (recent_date, fresh_date),     # 1-7 days
+                (week_old_date, recent_date),  # 7-30 days
+                (month_old_date, week_old_date), # 30-90 days
+            ]
+            
+            time_diverse_list = []
+            try:
+                for start_date, end_date in time_buckets:
+                    try:
+                        bucket_posts = all_time_base.filter(
+                            created_at__gte=start_date,
+                            created_at__lt=end_date
+                        ).annotate(
+                            engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+                        ).order_by('-engagement_score')[:10]
+                        time_diverse_list.extend(list(bucket_posts))
+                    except Exception:
+                        # Skip this bucket if there's an error
+                        continue
+            except Exception:
+                pass
+            
+            time_diverse_posts = time_diverse_list
+        
+        # Annotate all querysets with engagement score
+        # Use try-except to handle cases where queryset evaluation fails due to missing tables
+        try:
+            if following_ids:
+                followed_posts = followed_posts.annotate(
+                    engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+                )
+        except Exception:
+            followed_posts = Post.objects.none()
+        
+        try:
+            if joined_community_ids:
+                community_posts = community_posts.annotate(
+                    engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+                )
+        except Exception:
+            community_posts = Post.objects.none()
+        
+        try:
+            fresh_posts = fresh_posts.annotate(
+                engagement_score=Count('likes') + Count('comments') * 2 + Count('shares') * 3
+            )
+        except Exception:
+            fresh_posts = Post.objects.none()
+        
+        # Combine all pools - execute queries and convert to lists (with error handling)
+        all_candidate_posts = []
+        try:
+            if following_ids:
+                all_candidate_posts.extend(list(followed_posts))
+        except Exception:
+            pass
+        
+        try:
+            if joined_community_ids:
+                all_candidate_posts.extend(list(community_posts))
+        except Exception:
+            pass
+        
+        try:
+            if public_community_ids:
+                all_candidate_posts.extend(list(discovery_community_posts))
+        except Exception:
+            pass
+        
+        try:
+            all_candidate_posts.extend(list(discovery_personal_posts))
+        except Exception:
+            pass
+        
+        try:
+            all_candidate_posts.extend(list(fresh_posts))
+        except Exception:
+            pass
+        
+        # Add new user special pools if applicable
+        if is_new_user:
+            try:
+                all_candidate_posts.extend(all_time_popular_posts)
+            except Exception:
+                pass
+            try:
+                all_candidate_posts.extend(time_diverse_posts)
+            except Exception:
+                pass
         
         # Remove duplicates by post ID
         seen_ids = set()
@@ -378,11 +587,16 @@ class PostViewSet(viewsets.ModelViewSet):
                 seen_ids.add(post.id)
                 unique_posts.append(post)
         
-        # Calculate personalized scores for all posts
+        # Calculate personalized scores for all posts (with category matching)
         scored_posts = []
         for post in unique_posts:
-            score = self._calculate_post_score(post, user)
-            scored_posts.append((post, score))
+            try:
+                score = self._calculate_post_score(post, user, user_interest_names=user_interest_names, user_subcategories=user_subcategories)
+                scored_posts.append((post, score))
+            except Exception as e:
+                # Skip posts that cause errors in score calculation
+                # Use a default low score to still include them if needed
+                scored_posts.append((post, 0.1))
         
         # Sort by score
         scored_posts.sort(key=lambda x: x[1], reverse=True)
@@ -405,13 +619,23 @@ class PostViewSet(viewsets.ModelViewSet):
         low_engagement = scored_posts[medium_tier_end:]
         
         # Sample from each tier with randomization
-        feed_size = 50  # Target feed size
+        # New users get larger feed to explore content
+        feed_size = 80 if is_new_user else 50
         
         # Allocate posts per tier (with variation)
-        high_count = min(len(high_engagement), int(feed_size * 0.4))
-        medium_count = min(len(medium_engagement), int(feed_size * 0.3))
-        fresh_count = min(len(low_engagement), int(feed_size * 0.2))
-        random_count = min(total_posts, int(feed_size * 0.1))
+        # New users get more diverse time distribution
+        if is_new_user:
+            # 30% high engagement, 25% medium, 25% diverse time periods, 20% fresh
+            high_count = min(len(high_engagement), int(feed_size * 0.3))
+            medium_count = min(len(medium_engagement), int(feed_size * 0.25))
+            fresh_count = min(len(low_engagement), int(feed_size * 0.25))
+            random_count = min(total_posts, int(feed_size * 0.2))
+        else:
+            # Regular users: 40% high, 30% medium, 20% fresh, 10% random
+            high_count = min(len(high_engagement), int(feed_size * 0.4))
+            medium_count = min(len(medium_engagement), int(feed_size * 0.3))
+            fresh_count = min(len(low_engagement), int(feed_size * 0.2))
+            random_count = min(total_posts, int(feed_size * 0.1))
         
         # Random sampling within each tier (KEY FOR REFRESH VARIATION)
         selected_posts = []
@@ -447,30 +671,48 @@ class PostViewSet(viewsets.ModelViewSet):
         final_feed = pinned_posts + non_pinned
         
         # Record views for the posts being shown
-        views_to_create = [
-            PostView(user=user, post=post)
-            for post in final_feed[:20]  # Record views for first 20 posts
-            if not PostView.objects.filter(user=user, post=post).exists()
-        ]
-        if views_to_create:
-            PostView.objects.bulk_create(views_to_create, ignore_conflicts=True)
+        try:
+            views_to_create = [
+                PostView(user=user, post=post)
+                for post in final_feed[:20]  # Record views for first 20 posts
+                if not PostView.objects.filter(user=user, post=post).exists()
+            ]
+            if views_to_create:
+                PostView.objects.bulk_create(views_to_create, ignore_conflicts=True)
+        except Exception:
+            # If PostView model doesn't exist or there's an error, skip view tracking
+            pass
         
         # Paginate
-        page = self.paginate_queryset(final_feed)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response({
+        try:
+            page = self.paginate_queryset(final_feed)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True, context={'request': request})
+                return self.get_paginated_response({
+                    "success": True,
+                    "message": "News feed retrieved successfully",
+                    "data": serializer.data
+                })
+            
+            serializer = self.get_serializer(final_feed, many=True, context={'request': request})
+            return Response({
                 "success": True,
                 "message": "News feed retrieved successfully",
                 "data": serializer.data
             })
-        
-        serializer = self.get_serializer(final_feed, many=True)
-        return Response({
-            "success": True,
-            "message": "News feed retrieved successfully",
-            "data": serializer.data
-        })
+        except Exception as e:
+            # Log the error for debugging
+            import traceback
+            import sys
+            error_type, error_value, error_traceback = sys.exc_info()
+            print(f"Error in news_feed: {error_type.__name__}: {error_value}")
+            traceback.print_exc()
+            # Return empty feed if serialization fails
+            return Response({
+                "success": False,
+                "message": f"Error retrieving news feed: {str(e)}",
+                "data": []
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     @action(detail=False, methods=['get'])
     def community_posts(self, request):
@@ -941,7 +1183,13 @@ class FollowViewSet(viewsets.ModelViewSet):
             # Default: show who current user is following
             queryset = queryset.filter(follower=self.request.user)
         
-        return queryset.select_related('follower', 'following').order_by('-created_at')
+        # Prefetch profile data to avoid N+1 queries
+        return queryset.select_related(
+            'follower', 
+            'follower__profile',
+            'following', 
+            'following__profile'
+        ).order_by('-created_at')
 
     def perform_create(self, serializer):
         serializer.save(follower=self.request.user)
