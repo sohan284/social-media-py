@@ -194,6 +194,9 @@ class ProfileSerializer(serializers.ModelSerializer):
     user_id = serializers.IntegerField(source='user.id', read_only=True)
     can_edit = serializers.SerializerMethodField()
     posts_count = serializers.SerializerMethodField()
+    followers_count = serializers.SerializerMethodField()
+    following_count = serializers.SerializerMethodField()
+    communities_count = serializers.SerializerMethodField()
     interests = serializers.SerializerMethodField()  # Add this
     subcategories = serializers.PrimaryKeyRelatedField(
         many=True,
@@ -207,7 +210,8 @@ class ProfileSerializer(serializers.ModelSerializer):
             'id', 'user', 'user_id', 'username', 'email',
             'display_name', 'about', 'social_link', 'avatar', 
             'cover_photo', 'subcategories', 'interests',  # Added interests
-            'created_at', 'updated_at', 'can_edit', 'posts_count'
+            'created_at', 'updated_at', 'can_edit', 'posts_count',
+            'followers_count', 'following_count', 'communities_count'
         ]
         read_only_fields = ['user', 'created_at', 'updated_at']
 
@@ -220,6 +224,21 @@ class ProfileSerializer(serializers.ModelSerializer):
     def get_posts_count(self, obj):
         """Get count of approved posts by this user"""
         return obj.user.posts.filter(status='approved').count()
+    
+    def get_followers_count(self, obj):
+        """Get count of users following this user"""
+        from post.models import Follow
+        return Follow.objects.filter(following=obj.user).count()
+    
+    def get_following_count(self, obj):
+        """Get count of users this user is following"""
+        from post.models import Follow
+        return Follow.objects.filter(follower=obj.user).count()
+    
+    def get_communities_count(self, obj):
+        """Get count of communities this user is a member of"""
+        from community.models import CommunityMember
+        return CommunityMember.objects.filter(user=obj.user, is_approved=True).count()
     
     def get_interests(self, obj):
         """Group interests by category for better display"""
