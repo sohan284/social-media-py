@@ -265,6 +265,25 @@ class AdminUsersListView(APIView):
         }, status=200)
 
 
+""" Public Users List View """
+class PublicUsersListView(APIView):
+    """Get all users for authenticated users (not just admins)"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        """Get all users with basic information"""
+        users = User.objects.select_related('profile').all().order_by('-date_joined')
+        
+        # Use UserSerializer which is simpler and doesn't require admin
+        from .serializers import UserSerializer
+        serializer = UserSerializer(users, many=True, context={'request': request})
+        
+        return Response({
+            "success": True,
+            "data": serializer.data
+        }, status=200)
+
+
 class DashboardAnalyticsView(APIView):
     """Get dashboard analytics for admin panel"""
     permission_classes = [permissions.IsAuthenticated, IsAdmin]
