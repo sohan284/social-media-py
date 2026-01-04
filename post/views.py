@@ -1396,6 +1396,104 @@ class FollowViewSet(viewsets.ModelViewSet):
             "message": "User profile retrieved successfully",
             "data": serializer.data
         })
+
+    @action(detail=False, methods=['get'])
+    def suggestions(self, request):
+        """Get all users as suggestions with follow status"""
+        # Get all users except current user
+        all_users = list(User.objects.exclude(id=request.user.id).select_related('profile'))
+        user_ids = [user.id for user in all_users]
+        
+        if not user_ids:
+            return Response({
+                "success": True,
+                "message": "No user suggestions available",
+                "data": []
+            })
+        
+        # Get IDs of users the current user is following
+        following_ids = set(
+            Follow.objects.filter(follower=request.user)
+            .values_list('following_id', flat=True)
+        )
+        
+        # Get follow relationship IDs for users being followed
+        follow_relations = {
+            follow.following_id: follow.id
+            for follow in Follow.objects.filter(
+                follower=request.user,
+                following_id__in=user_ids
+            )
+        }
+        
+        # Get counts for each user using optimized queries
+        from django.db.models import Count
+        followers_counts = dict(
+            Follow.objects.filter(following_id__in=user_ids)
+            .values('following_id')
+            .annotate(count=Count('id'))
+            .values_list('following_id', 'count')
+        )
+        
+        following_counts = dict(
+            Follow.objects.filter(follower_id__in=user_ids)
+            .values('follower_id')
+            .annotate(count=Count('id'))
+            .values_list('follower_id', 'count')
+        )
+        
+        posts_counts = dict(
+            Post.objects.filter(
+                user_id__in=user_ids,
+                status='approved'
+            )
+            .values('user_id')
+            .annotate(count=Count('id'))
+            .values_list('user_id', 'count')
+        )
+        
+        # Build suggestion data with all required fields
+        # Create a simple class to hold suggestion data
+        class SuggestionData:
+            def __init__(self, user, is_following, follow_id, followers_count, following_count, posts_count):
+                self.id = user.id
+                self.username = user.username
+                self.profile = getattr(user, 'profile', None)
+                self.is_following = is_following
+                self.follow_id = follow_id
+                self.followers_count = followers_count
+                self.following_count = following_count
+                self.posts_count = posts_count
+        
+        suggestions_data = []
+        for user in all_users:
+            user_id = user.id
+            is_following = user_id in following_ids
+            follow_id = follow_relations.get(user_id)
+            
+            suggestion_obj = SuggestionData(
+                user=user,
+                is_following=is_following,
+                follow_id=follow_id,
+                followers_count=followers_counts.get(user_id, 0),
+                following_count=following_counts.get(user_id, 0),
+                posts_count=posts_counts.get(user_id, 0)
+            )
+            suggestions_data.append(suggestion_obj)
+        
+        # Serialize the data
+        serializer = UserSuggestionSerializer(
+            suggestions_data, 
+            many=True, 
+            context={'request': request}
+        )
+        
+        return Response({
+            "success": True,
+            "message": "User suggestions retrieved successfully",
+            "data": serializer.data
+        })
+
 class PostReportViewSet(viewsets.ModelViewSet):
     """ Viewset for Post Reports """
     queryset = PostReport.objects.all()

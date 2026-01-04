@@ -1,12 +1,13 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import viewsets, permissions, status
-from django.core.mail import send_mail
+from django.core.mail import send_mail, EmailMultiAlternatives
 from django.conf import settings
 import random
-from django.contrib.auth import authenticate
+from django.contrib.auth import authenticate, get_user_model
 from rest_framework_simplejwt.tokens import RefreshToken
 from .permissions import IsOwnerOrReadOnly, IsAdmin
+from .email_templates import get_otp_verification_email_template, get_password_reset_email_template
 from post.models import Post
 from post.serializers import PostSerializer
 from community.models import Community
@@ -26,7 +27,7 @@ from .serializers import (
     SendOTPSerializer, VerifyOTPSerializer, SetCredentialsSerializer,
     LoginSerializer, OAuthRegisterSerializer, OAuthLoginSerializer,
     SendPasswordResetOTPSerializer, VerifyPasswordResetOTPSerializer, ResetPasswordSerializer,
-    ProfileSerializer, ProfileUpdateSerializer, AdminUserSerializer
+    ProfileSerializer, ProfileUpdateSerializer, AdminUserSerializer, ContactSerializer
 )
 from post.models import *
 from post.serializers import *
@@ -84,13 +85,18 @@ class SendOTPView(APIView):
         user.username_set = False
         user.save()
 
-        send_mail(
-            subject='Your verification code',
-            message=f'Your verification code is {code}',
+        # Send beautiful HTML email
+        html_content = get_otp_verification_email_template(code)
+        text_content = f'Your verification code is {code}. This code will expire in 10 minutes.'
+        
+        email = EmailMultiAlternatives(
+            subject='Verify Your Email - Social Media Platform',
+            body=text_content,
             from_email=settings.EMAIL_HOST_USER,
-            recipient_list=[email],
-            fail_silently=False,
+            to=[email],
         )
+        email.attach_alternative(html_content, "text/html")
+        email.send()
 
         return Response({
             "success": True,
@@ -182,8 +188,14 @@ class SetCredentialsView(APIView):
 
         return Response({
             "success": True,
-            "message": "Credentials set successfully. You can now log in.",
-            "tokens": tokens_for_user(user)
+            "message": "Credentials set successfully. You are now logged in.",
+            "tokens": tokens_for_user(user),
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "username": user.username,
+                "role": user.role if hasattr(user, 'role') else 'user'
+            }
         }, status=201)
         
 """Login View"""
@@ -728,14 +740,18 @@ class SendPasswordResetOTPView(APIView):
         user.verification_code = code
         user.save()
 
-        # Send OTP email
-        send_mail(
-            subject='Password Reset Verification Code',
-            message=f'Your password reset verification code is {code}. This code will expire in 10 minutes.',
+        # Send beautiful HTML email
+        html_content = get_password_reset_email_template(code)
+        text_content = f'Your password reset verification code is {code}. This code will expire in 10 minutes.'
+        
+        email = EmailMultiAlternatives(
+            subject='Reset Your Password - Social Media Platform',
+            body=text_content,
             from_email=settings.EMAIL_HOST_USER,
-            recipient_list=[email],
-            fail_silently=False,
+            to=[email],
         )
+        email.attach_alternative(html_content, "text/html")
+        email.send()
 
         return Response({
             "success": True,
@@ -818,3 +834,75 @@ class ResetPasswordView(APIView):
             "success": True,
             "message": "Password reset successfully. You can now login with your new password."
         }, status=200)
+
+
+""" Contact Section """
+class ContactViewSet(viewsets.ModelViewSet):
+    """ViewSet for Contact form submissions"""
+    queryset = Contact.objects.all()
+    serializer_class = ContactSerializer
+    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    
+    def get_permissions(self):
+        """Allow anyone to create contacts, but only admins can view/list"""
+        if self.action == 'create':
+            permission_classes = [permissions.AllowAny]
+        else:
+            permission_classes = [permissions.IsAuthenticated, IsAdmin]
+        return [permission() for permission in permission_classes]
+    
+    def create(self, request, *args, **kwargs):
+        """Create a new contact submission"""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+        headers = self.get_success_headers(serializer.data)
+        return Response({
+            "success": True,
+            "message": "Thank you for contacting us! We'll get back to you soon.",
+            "data": serializer.data
+        }, status=status.HTTP_201_CREATED, headers=headers)
+    
+    def list(self, request, *args, **kwargs):
+        """List all contact submissions (admin only)"""
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            return self.get_paginated_response({
+                "success": True,
+                "message": "Contacts retrieved successfully",
+                "data": serializer.data
+            })
+        serializer = self.get_serializer(queryset, many=True)
+        return Response({
+            "success": True,
+            "message": "Contacts retrieved successfully",
+            "data": serializer.data
+        })
+    
+    def retrieve(self, request, *args, **kwargs):
+        """Retrieve a specific contact submission"""
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response({
+            "success": True,
+            "message": "Contact retrieved successfully",
+            "data": serializer.data
+        })
+    
+    @action(detail=True, methods=['patch'])
+    def mark_read(self, request, pk=None):
+        """Mark a contact submission as read"""
+        contact = self.get_object()
+        contact.is_read = True
+        contact.read_at = timezone.now()
+        contact.read_by = request.user
+        contact.save()
+        
+        serializer = self.get_serializer(contact)
+        return Response({
+            "success": True,
+            "message": "Contact marked as read",
+            "data": serializer.data
+        })
