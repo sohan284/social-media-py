@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import User, Profile
+from .models import User, Profile, Contact
 import re
 from django.contrib.auth.password_validation import validate_password
 from interest.models import SubCategory
@@ -270,3 +270,17 @@ class ProfileUpdateSerializer(serializers.ModelSerializer):
         if len(value) > 20:  # Example: limit to 20 interests
             raise serializers.ValidationError("You can select a maximum of 20 interests.")
         return value
+
+""" Contact Section """
+class ContactSerializer(serializers.ModelSerializer):
+    """Serializer for Contact form submissions"""
+    read_by_name = serializers.CharField(source='read_by.username', read_only=True, allow_null=True)
+    
+    class Meta:
+        model = Contact
+        fields = [
+            'id', 'first_name', 'last_name', 'email', 
+            'subject', 'message', 'created_at', 
+            'is_read', 'read_at', 'read_by', 'read_by_name'
+        ]
+        read_only_fields = ['created_at', 'is_read', 'read_at', 'read_by']

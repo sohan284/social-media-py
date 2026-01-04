@@ -395,6 +395,49 @@ class FollowSerializer(serializers.ModelSerializer):
             )
         
         return follow
+
+class UserSuggestionSerializer(serializers.Serializer):
+    """ Serializer for User Suggestions with follow status """
+    id = serializers.IntegerField()
+    username = serializers.CharField()
+    avatar = serializers.SerializerMethodField()
+    about = serializers.SerializerMethodField()
+    display_name = serializers.SerializerMethodField()
+    followers_count = serializers.IntegerField()
+    following_count = serializers.IntegerField()
+    posts_count = serializers.IntegerField()
+    is_following = serializers.BooleanField()
+    follow_id = serializers.IntegerField(allow_null=True)
+    
+    def get_avatar(self, obj):
+        """Get user's avatar URL"""
+        try:
+            if hasattr(obj, 'profile') and obj.profile.avatar:
+                request = self.context.get('request')
+                if request:
+                    return request.build_absolute_uri(obj.profile.avatar.url)
+                return obj.profile.avatar.url
+        except Exception:
+            pass
+        return None
+    
+    def get_about(self, obj):
+        """Get user's about text"""
+        try:
+            if hasattr(obj, 'profile') and obj.profile.about:
+                return obj.profile.about
+        except Exception:
+            pass
+        return None
+    
+    def get_display_name(self, obj):
+        """Get user's display name"""
+        try:
+            if hasattr(obj, 'profile') and obj.profile.display_name:
+                return obj.profile.display_name
+        except Exception:
+            pass
+        return obj.username
     
 class PostReportSerializer(serializers.ModelSerializer):
     """ Serializer for Post Report """

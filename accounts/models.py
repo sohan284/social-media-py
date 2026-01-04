@@ -56,3 +56,30 @@ def create_user_profile(sender, instance, created, **kwargs):
 def save_user_profile(sender, instance, **kwargs):
     if hasattr(instance, 'profile'):
         instance.profile.save()
+
+
+class Contact(models.Model):
+    """Model to store contact form submissions"""
+    first_name = models.CharField(max_length=100)
+    last_name = models.CharField(max_length=100)
+    email = models.EmailField()
+    subject = models.CharField(max_length=200)
+    message = models.TextField()
+    created_at = models.DateTimeField(default=timezone.now)
+    is_read = models.BooleanField(default=False)
+    read_at = models.DateTimeField(blank=True, null=True)
+    read_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='read_contacts'
+    )
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Contact Submission'
+        verbose_name_plural = 'Contact Submissions'
+
+    def __str__(self):
+        return f"{self.first_name} {self.last_name} - {self.subject}"
