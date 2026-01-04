@@ -21,4 +21,6 @@ urlpatterns = [
     # Admin endpoints
     path('admin/users/', AdminUsersListView.as_view(), name='admin-users'),
     path('admin/dashboard-analytics/', DashboardAnalyticsView.as_view(), name='dashboard-analytics'),
+    # Public endpoints (for authenticated users)
+    path('users/', PublicUsersListView.as_view(), name='public-users'),
 ]

@@ -943,8 +943,28 @@ class PostViewSet(viewsets.ModelViewSet):
                 "error": "user_id parameter is required"
             }, status=status.HTTP_400_BAD_REQUEST)
         
+        try:
+            # Try to parse as integer first (ID)
+            if user_id.isdigit():
+                target_user_id = int(user_id)
+            else:
+                # If not a number, treat as username and get the user
+                try:
+                    target_user = User.objects.get(username=user_id)
+                    target_user_id = target_user.id
+                except User.DoesNotExist:
+                    return Response({
+                        "success": False,
+                        "error": "User not found"
+                    }, status=status.HTTP_404_NOT_FOUND)
+        except ValueError:
+            return Response({
+                "success": False,
+                "error": "Invalid user identifier"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
         posts = Post.objects.filter(
-            user_id=user_id,
+            user_id=target_user_id,
             status='approved'
         ).select_related('user', 'community').prefetch_related(
             'likes', 'comments', 'shares'
@@ -1307,12 +1327,22 @@ class FollowViewSet(viewsets.ModelViewSet):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         try:
-            following_user = User.objects.get(id=following_id)
+            # Try to parse as integer first (ID)
+            if str(following_id).isdigit():
+                following_user = User.objects.get(id=int(following_id))
+            else:
+                # If not a number, treat as username
+                following_user = User.objects.get(username=following_id)
         except User.DoesNotExist:
             return Response({
                 "success": False,
                 "error": "User not found"
             }, status=status.HTTP_404_NOT_FOUND)
+        except ValueError:
+            return Response({
+                "success": False,
+                "error": "Invalid user identifier"
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         if following_user == request.user:
             return Response({
@@ -1361,12 +1391,22 @@ class FollowViewSet(viewsets.ModelViewSet):
             target_user = request.user
         else:
             try:
-                target_user = User.objects.get(id=user_id)
+                # Try to parse as integer first (ID)
+                if user_id.isdigit():
+                    target_user = User.objects.get(id=int(user_id))
+                else:
+                    # If not a number, treat as username
+                    target_user = User.objects.get(username=user_id)
             except User.DoesNotExist:
                 return Response({
                     "success": False,
                     "error": "User not found"
                 }, status=status.HTTP_404_NOT_FOUND)
+            except ValueError:
+                return Response({
+                    "success": False,
+                    "error": "Invalid user identifier"
+                }, status=status.HTTP_400_BAD_REQUEST)
         
         # Get stats with optimized queries
         followers_count = Follow.objects.filter(following=target_user).count()
