@@ -18,7 +18,7 @@ class CommunityViewSet(viewsets.ModelViewSet):
     """ViewSet for Community management"""
     queryset = Community.objects.all()
     serializer_class = CommunitySerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticatedOrReadOnly]  # Allow public read access
     lookup_field = 'name'
     
     def get_serializer_class(self):
@@ -176,16 +176,23 @@ class CommunityViewSet(viewsets.ModelViewSet):
     def popular(self, request):
         """Get popular communities based on members count"""
         user = request.user
-        # Show public, restricted, and private communities user is member of OR has pending invitation
-        communities = Community.objects.filter(
-            Q(visibility='public') | 
-            Q(visibility='restricted') |
-            Q(visibility='private', members__user=user, members__is_approved=True) |
-            Q(visibility='private', invitations__invitee=user, invitations__status='pending')
-        ).exclude(
-            Q(visibility='private') & 
-            Q(invitations__invitee=user, invitations__status='declined')
-        ).distinct().order_by('-members_count', '-posts_count')[:20]
+        
+        # For unauthenticated users, only show public communities
+        if not user.is_authenticated:
+            communities = Community.objects.filter(
+                visibility='public'
+            ).distinct().order_by('-members_count', '-posts_count')[:20]
+        else:
+            # For authenticated users, show public, restricted, and private communities user is member of OR has pending invitation
+            communities = Community.objects.filter(
+                Q(visibility='public') | 
+                Q(visibility='restricted') |
+                Q(visibility='private', members__user=user, members__is_approved=True) |
+                Q(visibility='private', invitations__invitee=user, invitations__status='pending')
+            ).exclude(
+                Q(visibility='private') & 
+                Q(invitations__invitee=user, invitations__status='declined')
+            ).distinct().order_by('-members_count', '-posts_count')[:20]
         
         page = self.paginate_queryset(communities)
         if page is not None:
