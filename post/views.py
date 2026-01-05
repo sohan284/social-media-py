@@ -29,6 +29,12 @@ class PostViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     parser_classes = [parsers.MultiPartParser, parsers.FormParser, parsers.JSONParser]
 
+    def get_permissions(self):
+        """Override permissions for news_feed action to allow public access"""
+        if self.action == 'news_feed':
+            return [permissions.AllowAny()]
+        return super().get_permissions()
+
     def get_queryset(self):
         # Handle Swagger schema generation
         if getattr(self, 'swagger_fake_view', False):
@@ -354,6 +360,19 @@ class PostViewSet(viewsets.ModelViewSet):
         - 10% Random picks (serendipity)
         """
         user = request.user
+        
+        # For unauthenticated users, return general approved posts
+        if not user.is_authenticated:
+            approved_posts = Post.objects.filter(status='approved').select_related('user', 'community').prefetch_related(
+                'likes', 'comments', 'shares'
+            ).order_by('-created_at')[:50]
+            
+            serializer = PostSerializer(approved_posts, many=True, context={'request': request})
+            return Response({
+                "success": True,
+                "message": "News feed retrieved successfully",
+                "data": serializer.data
+            })
         
         # Time windows
         recent_date = timezone.now() - timedelta(days=7)
