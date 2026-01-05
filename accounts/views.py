@@ -265,6 +265,103 @@ class AdminUsersListView(APIView):
         }, status=200)
 
 
+""" Admin User Block/Unblock View """
+class AdminBlockUserView(APIView):
+    """Block or unblock a user (admin only)"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def post(self, request, user_id):
+        """Block a user"""
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found"
+            }, status=404)
+        
+        # Prevent blocking yourself
+        if user.id == request.user.id:
+            return Response({
+                "success": False,
+                "error": "You cannot block yourself"
+            }, status=400)
+        
+        # Prevent blocking other admins
+        if user.role == 'admin' and user.id != request.user.id:
+            return Response({
+                "success": False,
+                "error": "You cannot block other admin users"
+            }, status=400)
+        
+        # Block user by setting is_active to False
+        user.is_active = False
+        user.save()
+        
+        return Response({
+            "success": True,
+            "message": f"User {user.username} has been blocked successfully"
+        }, status=200)
+    
+    def delete(self, request, user_id):
+        """Unblock a user"""
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found"
+            }, status=404)
+        
+        # Unblock user by setting is_active to True
+        user.is_active = True
+        user.save()
+        
+        return Response({
+            "success": True,
+            "message": f"User {user.username} has been unblocked successfully"
+        }, status=200)
+
+
+""" Admin User Delete View """
+class AdminDeleteUserView(APIView):
+    """Delete a user (admin only)"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def delete(self, request, user_id):
+        """Delete a user"""
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "User not found"
+            }, status=404)
+        
+        # Prevent deleting yourself
+        if user.id == request.user.id:
+            return Response({
+                "success": False,
+                "error": "You cannot delete your own account"
+            }, status=400)
+        
+        # Prevent deleting other admins
+        if user.role == 'admin' and user.id != request.user.id:
+            return Response({
+                "success": False,
+                "error": "You cannot delete other admin users"
+            }, status=400)
+        
+        username = user.username
+        # Delete the user (this will cascade delete the profile due to CASCADE relationship)
+        user.delete()
+        
+        return Response({
+            "success": True,
+            "message": f"User {username} has been deleted successfully"
+        }, status=200)
+
+
 """ Public Users List View """
 class PublicUsersListView(APIView):
     """Get all users for authenticated users (not just admins)"""
