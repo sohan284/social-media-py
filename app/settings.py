@@ -142,9 +142,27 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'x-forwarded-for',
+    'x-forwarded-proto',
 ]
 
 CORS_PREFLIGHT_MAX_AGE = 86400  # 24 hours
+
+# CORS exposed headers
+CORS_EXPOSE_HEADERS = [
+    'content-type',
+    'authorization',
+]
+
+# Ensure CORS middleware handles all origins (optional, since CORS_ALLOW_ALL_ORIGINS is True)
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3000",
+    "http://127.0.0.1:3001",
+]
+
+# If CORS_ALLOW_ALL_ORIGINS is True, the above is ignored, but keeping for reference
 
 ROOT_URLCONF = 'app.urls'
 

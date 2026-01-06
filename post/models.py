@@ -44,6 +44,14 @@ class Post(models.Model):
     )
     is_pinned = models.BooleanField(default=False, help_text='Pinned posts appear at the top')
     status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='approved')
+    shared_from = models.ForeignKey(
+        'self',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='shared_posts',
+        help_text='If set, this post is a share of another post. Points to the original post.'
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
