@@ -136,7 +136,37 @@ class MarketplaceProductViewSet(viewsets.ModelViewSet):
         return queryset.filter(Q(status='published') | Q(user=user))
 
     def list(self, request, *args, **kwargs):
+        from datetime import datetime
+        import logging
+        
+        logger = logging.getLogger(__name__)
+        
         queryset = self.filter_queryset(self.get_queryset())
+        
+        # Filter by date range if provided
+        start_date = request.query_params.get('start_date', None)
+        end_date = request.query_params.get('end_date', None)
+        
+        logger.info(f"Product list - start_date: {start_date}, end_date: {end_date}")
+        
+        if start_date:
+            try:
+                date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+                queryset = queryset.filter(created_at__date__gte=date_obj)
+                logger.info(f"Applied start_date filter: {date_obj}")
+            except (ValueError, TypeError) as e:
+                logger.error(f"Error parsing start_date '{start_date}': {str(e)}")
+                pass
+        
+        if end_date:
+            try:
+                date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+                queryset = queryset.filter(created_at__date__lte=date_obj)
+                logger.info(f"Applied end_date filter: {date_obj}")
+            except (ValueError, TypeError) as e:
+                logger.error(f"Error parsing end_date '{end_date}': {str(e)}")
+                pass
+        
         serializer = self.get_serializer(queryset, many=True)
         return success_response("Product list retrieved successfully.", serializer.data)
 

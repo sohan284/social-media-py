@@ -158,6 +158,7 @@ class PostSerializer(serializers.ModelSerializer):
     can_edit = serializers.SerializerMethodField()
     can_delete = serializers.SerializerMethodField()
     is_liked = serializers.SerializerMethodField()
+    original_post = serializers.SerializerMethodField()
 
     media_files = serializers.ListField(
         child=serializers.FileField(max_length=100000, allow_empty_file=False, use_url=True),
@@ -172,9 +173,22 @@ class PostSerializer(serializers.ModelSerializer):
             'id', 'user', 'user_name', 'avatar', 'title', 'post_type', 'content', 'media_file', 'media_files', 'link',
             'tags', 'subcategories', 'status', 'created_at', 'updated_at',
             'likes_count', 'comments_count', 'shares_count', 'comments',
-            'can_edit', 'can_delete', 'is_liked', 'community',
+            'can_edit', 'can_delete', 'is_liked', 'community', 'shared_from', 'original_post',
         ]
         read_only_fields = ['user', 'likes_count', 'comments_count', 'shares_count', 'created_at', 'updated_at']
+    
+    def validate_status(self, value):
+        """Allow status to be set during creation (for drafts), and allow updates for draft posts"""
+        if self.instance is None:
+            # During creation, allow status to be set (e.g., 'draft')
+            return value
+        # During updates, allow status changes if current status is 'draft' (user can publish their own drafts)
+        if self.instance and self.instance.status == 'draft':
+            # Allow changing from draft to approved/pending
+            if value in ['approved', 'pending']:
+                return value
+        # For other cases, don't allow direct status updates via serializer
+        return self.instance.status
     
     def get_subcategories(self, obj):
         """Safely get subcategories - handles case where field doesn't exist yet"""
@@ -302,6 +316,44 @@ class PostSerializer(serializers.ModelSerializer):
         if request and request.user.is_authenticated:
             return Like.objects.filter(user=request.user, post=obj).exists()
         return False
+    
+    def get_original_post(self, obj):
+        """Return the original post data if this is a shared post"""
+        if obj.shared_from:
+            # Return a simplified version of the original post
+            original = obj.shared_from
+            # Get avatar using the same method as the main post
+            avatar = None
+            try:
+                avatar = original.user.profile.avatar.url if original.user.profile.avatar else None
+            except Profile.DoesNotExist:
+                avatar = None
+            
+            # Get like count and is_liked status for the original post
+            request = self.context.get('request')
+            is_liked = False
+            if request and request.user.is_authenticated:
+                from .models import Like
+                is_liked = Like.objects.filter(user=request.user, post=original).exists()
+            
+            return {
+                'id': original.id,
+                'user': original.user.id,
+                'user_name': original.user.username,
+                'avatar': avatar,
+                'title': original.title,
+                'post_type': original.post_type,
+                'content': original.content,
+                'media_file': original.media_file,
+                'link': original.link,
+                'tags': original.tags,
+                'created_at': original.created_at.isoformat() if original.created_at else None,
+                'community': original.community.id if original.community else None,
+                'likes_count': original.likes.count(),
+                'comments_count': original.comments.count(),
+                'is_liked': is_liked,
+            }
+        return None
     
 class FollowSerializer(serializers.ModelSerializer):
     """ Serializer for Follow """

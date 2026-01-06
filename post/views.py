@@ -45,25 +45,31 @@ class PostViewSet(viewsets.ModelViewSet):
         # Admin users can see all posts regardless of status
         if hasattr(user, 'role') and user.role == 'admin':
             if self.action == 'list':
-                return Post.objects.select_related('user', 'community').prefetch_related(
+                return Post.objects.select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
                     'likes', 'comments', 'shares'
                 ).order_by('-created_at')
             else:
-                return Post.objects.select_related('user', 'community').prefetch_related(
+                return Post.objects.select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
                     'likes', 'comments', 'shares'
                 ).order_by('-created_at')
         
         # Regular users see only approved posts or their own posts
         if self.action == 'list':
-            return Post.objects.filter(status='approved').order_by('-created_at')
+            return Post.objects.filter(status='approved').select_related('user', 'community', 'shared_from', 'shared_from__user').order_by('-created_at')
         else:
             return Post.objects.filter(
                 Q(status='approved') | Q(user=user)
-            ).order_by('-created_at')
+            ).select_related('user', 'community', 'shared_from', 'shared_from__user').order_by('-created_at')
 
     def perform_create(self, serializer):
         """Create post with community validation and content moderation"""
         community = serializer.validated_data.get('community')
+        requested_status = serializer.validated_data.get('status')
+        
+        # If status is explicitly set to 'draft', save as draft without moderation
+        if requested_status == 'draft':
+            post = serializer.save(user=self.request.user, status='draft')
+            return
         
         # CONTENT MODERATION
         title = serializer.validated_data.get('title', '')
@@ -133,6 +139,9 @@ class PostViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         """List posts with pagination support"""
+        from django.utils import timezone
+        from datetime import datetime, time as dt_time
+        
         queryset = self.filter_queryset(self.get_queryset())
         
         # Filter by status if provided (for admin to get rejected posts, etc.)
@@ -142,6 +151,53 @@ class PostViewSet(viewsets.ModelViewSet):
             if hasattr(request.user, 'role') and request.user.role == 'admin':
                 queryset = queryset.filter(status=status_filter)
             # For non-admin users, ignore status filter and use default queryset behavior
+        
+        # Filter by date range if provided
+        start_date = request.query_params.get('start_date', None)
+        end_date = request.query_params.get('end_date', None)
+        
+        if start_date:
+            try:
+                # Parse date string (YYYY-MM-DD format)
+                date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+                # Use __date lookup for date-only comparison (more reliable across timezones)
+                queryset = queryset.filter(created_at__date__gte=date_obj)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Filtering posts with created_at__date >= {date_obj} (from input: {start_date})")
+            except (ValueError, TypeError) as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error parsing start_date '{start_date}': {str(e)}")
+                pass  # Invalid date format, ignore
+        
+        if end_date:
+            try:
+                # Parse date string (YYYY-MM-DD format)
+                date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+                # Use __date lookup for date-only comparison (more reliable across timezones)
+                queryset = queryset.filter(created_at__date__lte=date_obj)
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.info(f"Filtering posts with created_at__date <= {date_obj} (from input: {end_date})")
+            except (ValueError, TypeError) as e:
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error parsing end_date '{end_date}': {str(e)}")
+                pass  # Invalid date format, ignore
+        
+        # Filter by search query if provided (for admin)
+        search_query = request.query_params.get('search', None)
+        if search_query and hasattr(request.user, 'role') and request.user.role == 'admin':
+            from django.db.models import Q
+            search_query = search_query.strip()
+            if search_query:
+                queryset = queryset.filter(
+                    Q(title__icontains=search_query) |
+                    Q(content__icontains=search_query) |
+                    Q(user__username__icontains=search_query) |
+                    Q(user__email__icontains=search_query)
+                )
         
         # Get pagination parameters
         page_size = request.query_params.get('limit', None)
@@ -210,16 +266,80 @@ class PostViewSet(viewsets.ModelViewSet):
             "message": "Post approved and reposted successfully.",
             "data": serializer.data
         })
+    
+    @action(detail=True, methods=['post'])
+    def publish(self, request, pk=None):
+        """Publish a draft post (user can publish their own drafts)"""
+        post = self.get_object()
+        
+        # Check if user owns the post
+        if post.user != request.user:
+            raise PermissionDenied("You can only publish your own draft posts.")
+        
+        # Only allow publishing draft posts
+        if post.status != 'draft':
+            return Response({
+                "success": False,
+                "message": f"Post is not a draft. Current status: {post.status}"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Apply content moderation before publishing
+        title = post.title or ''
+        content = post.content or ''
+        media_files = post.media_file or []
+        
+        is_approved, rejection_reason = moderate_post(title, content, media_files)
+        
+        if not is_approved:
+            return Response({
+                "success": False,
+                "message": "Post cannot be published due to content moderation",
+                "error": rejection_reason
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Determine final status based on community settings
+        if post.community:
+            if post.community.visibility == 'private':
+                post.status = 'pending'
+            else:
+                post.status = 'approved'
+                # Update posts_count for approved posts
+                Community.objects.filter(pk=post.community.pk).update(posts_count=F('posts_count') + 1)
+        else:
+            # Personal post - approve immediately
+            post.status = 'approved'
+        
+        post.save()
+        
+        serializer = self.get_serializer(post)
+        return Response({
+            "success": True,
+            "message": "Post published successfully.",
+            "data": serializer.data
+        })
 
     def perform_destroy(self, instance):
-        """Update community posts_count when post is deleted"""
+        """Update community posts_count when post is deleted and handle shared posts"""
         community = instance.community
         was_approved = instance.status == 'approved'
+        is_shared_post = instance.shared_from is not None
+        
+        # If this is a shared post, delete the associated Share record
+        if is_shared_post:
+            try:
+                from .models import Share
+                Share.objects.filter(user=instance.user, post=instance.shared_from).delete()
+            except Exception as e:
+                # Log error but don't fail the deletion
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Error deleting Share record for shared post {instance.id}: {e}")
         
         super().perform_destroy(instance)
         
         # Update posts_count if post was approved and had a community
-        if was_approved and community:
+        # Only count non-shared posts for community posts_count
+        if was_approved and community and not is_shared_post:
             Community.objects.filter(pk=community.pk).update(posts_count=F('posts_count') - 1)
     
     def destroy(self, request, *args, **kwargs):
@@ -247,18 +367,45 @@ class PostViewSet(viewsets.ModelViewSet):
         old_status = instance.status if instance.pk else None
         old_community = instance.community
         
+        # Check if status is being changed from draft to approved/pending (publishing draft)
+        new_status = serializer.validated_data.get('status')
+        if old_status == 'draft' and new_status and new_status in ['approved', 'pending']:
+            # Apply content moderation before publishing draft
+            title = serializer.validated_data.get('title', instance.title) or ''
+            content = serializer.validated_data.get('content', instance.content) or ''
+            media_files = instance.media_file or []
+            
+            is_approved, rejection_reason = moderate_post(title, content, media_files)
+            
+            if not is_approved:
+                raise serializers.ValidationError({
+                    "status": "Post cannot be published due to content moderation",
+                    "content_moderation": rejection_reason
+                })
+            
+            # Determine final status based on community settings
+            community = serializer.validated_data.get('community', instance.community)
+            if community:
+                if community.visibility == 'private':
+                    serializer.validated_data['status'] = 'pending'
+                else:
+                    serializer.validated_data['status'] = 'approved'
+            else:
+                # Personal post - approve immediately
+                serializer.validated_data['status'] = 'approved'
+        
         # Save the post
         super().perform_update(serializer)
         
         # Get the updated instance
         updated_instance = serializer.instance
-        new_status = updated_instance.status
+        final_status = updated_instance.status
         new_community = updated_instance.community
         
         # Handle posts_count updates when status changes
-        if old_community and old_status != new_status:
+        if old_community and old_status != final_status:
             # Post was approved, now it's not
-            if old_status == 'approved' and new_status != 'approved':
+            if old_status == 'approved' and final_status != 'approved':
                 Community.objects.filter(pk=old_community.pk).update(posts_count=F('posts_count') - 1)
             # Post was not approved, now it is
             elif old_status != 'approved' and new_status == 'approved':
@@ -363,7 +510,7 @@ class PostViewSet(viewsets.ModelViewSet):
         
         # For unauthenticated users, return general approved posts
         if not user.is_authenticated:
-            approved_posts = Post.objects.filter(status='approved').select_related('user', 'community').prefetch_related(
+            approved_posts = Post.objects.filter(status='approved').select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
                 'likes', 'comments', 'shares'
             ).order_by('-created_at')[:50]
             
@@ -455,7 +602,7 @@ class PostViewSet(viewsets.ModelViewSet):
         base_posts = Post.objects.filter(
             status='approved',
             created_at__gte=timezone.now() - timedelta(days=time_window_days)
-        ).select_related('user', 'community').prefetch_related(*prefetch_fields)
+        ).select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(*prefetch_fields)
         
         # POOL 1: Posts from followed users (personal posts)
         followed_posts = base_posts.filter(
@@ -509,7 +656,7 @@ class PostViewSet(viewsets.ModelViewSet):
             all_time_base = Post.objects.filter(
                 status='approved',
                 created_at__gte=timezone.now() - timedelta(days=time_window_days)
-            ).select_related('user', 'community').prefetch_related(*prefetch_fields)
+            ).select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(*prefetch_fields)
             
             # High engagement posts from different time periods
             # Recent (last 7 days)
@@ -934,9 +1081,23 @@ class PostViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def my_posts(self, request):
-        """Get all posts created by current user (any status)"""
-        posts = Post.objects.filter(user=request.user).select_related('community').order_by('-created_at')
-        page = self.paginate_queryset(posts)
+        """Get all posts created by current user (approved first, then drafts below)"""
+        # Get approved posts first, ordered by created_at descending
+        approved_posts = Post.objects.filter(
+            user=request.user,
+            status='approved'
+        ).select_related('community', 'shared_from', 'shared_from__user').order_by('-created_at')
+        
+        # Get draft posts, ordered by created_at descending
+        draft_posts = Post.objects.filter(
+            user=request.user,
+            status='draft'
+        ).select_related('community', 'shared_from', 'shared_from__user').order_by('-created_at')
+        
+        # Combine: approved first, then drafts
+        all_posts = list(approved_posts) + list(draft_posts)
+        
+        page = self.paginate_queryset(all_posts)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response({
@@ -944,7 +1105,7 @@ class PostViewSet(viewsets.ModelViewSet):
                 "message": "My posts retrieved successfully",
                 "data": serializer.data
             })
-        serializer = self.get_serializer(posts, many=True)
+        serializer = self.get_serializer(all_posts, many=True)
         return Response({
             "success": True,
             "message": "My posts retrieved successfully",
@@ -953,7 +1114,7 @@ class PostViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def user_posts(self, request):
-        """Get approved posts by a specific user"""
+        """Get approved posts by a specific user (or all posts including drafts if viewing own profile)"""
         user_id = request.query_params.get('user_id')
         
         if not user_id:
@@ -982,14 +1143,36 @@ class PostViewSet(viewsets.ModelViewSet):
                 "error": "Invalid user identifier"
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        posts = Post.objects.filter(
-            user_id=target_user_id,
-            status='approved'
-        ).select_related('user', 'community').prefetch_related(
-            'likes', 'comments', 'shares'
-        ).order_by('-created_at')
+        # Check if viewing own profile
+        is_own_profile = request.user.is_authenticated and request.user.id == target_user_id
         
-        page = self.paginate_queryset(posts)
+        if is_own_profile:
+            # For own profile: show approved posts first, then drafts
+            approved_posts = Post.objects.filter(
+                user_id=target_user_id,
+                status='approved'
+            ).select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
+                'likes', 'comments', 'shares'
+            ).order_by('-created_at')
+            
+            draft_posts = Post.objects.filter(
+                user_id=target_user_id,
+                status='draft'
+            ).select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
+                'likes', 'comments', 'shares'
+            ).order_by('-created_at')
+            
+            all_posts = list(approved_posts) + list(draft_posts)
+        else:
+            # For other users: only show approved posts
+            all_posts = Post.objects.filter(
+                user_id=target_user_id,
+                status='approved'
+            ).select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
+                'likes', 'comments', 'shares'
+            ).order_by('-created_at')
+        
+        page = self.paginate_queryset(all_posts)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response({
@@ -998,7 +1181,7 @@ class PostViewSet(viewsets.ModelViewSet):
                 "data": serializer.data
             })
         
-        serializer = self.get_serializer(posts, many=True)
+        serializer = self.get_serializer(all_posts, many=True)
         return Response({
             "success": True,
             "message": "User posts retrieved successfully",
@@ -1195,17 +1378,100 @@ class ShareViewSet(viewsets.ModelViewSet):
         return queryset.order_by('-created_at')
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        # Don't call serializer.save() here - we'll handle creation in create() method
+        pass
 
     def create(self, request, *args, **kwargs):
+        """
+        Create a share - this creates both a Share record and a new Post with shared_from
+        If sharing a shared post, it will share the original post instead
+        """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        self.perform_create(serializer)
+        
+        post_to_share = serializer.validated_data['post']
+        user = request.user
+        
+        # Traverse up the shared_from chain to find the original post
+        # If someone shares a shared post, we want to share the original post
+        original_post = post_to_share
+        while original_post.shared_from is not None:
+            original_post = original_post.shared_from
+        
+        # Check if post is already shared by this user (check against original post)
+        existing_share = Share.objects.filter(user=user, post=original_post).first()
+        if existing_share:
+            # Check if the shared post exists
+            existing_shared_post = Post.objects.filter(user=user, shared_from=original_post).first()
+            if existing_shared_post:
+                post_serializer = PostSerializer(existing_shared_post, context={'request': request})
+                return Response({
+                    "success": True,
+                    "message": "Post already shared",
+                    "data": post_serializer.data
+                }, status=status.HTTP_200_OK)
+            else:
+                # Share record exists but post doesn't - create the post
+                shared_post = Post.objects.create(
+                    user=user,
+                    title='Shared Post',  # Simple title - not displayed in UI, original post title is shown instead
+                    post_type='text',
+                    content='',
+                    shared_from=original_post,
+                    status='approved',
+                    community=original_post.community,
+                )
+                post_serializer = PostSerializer(shared_post, context={'request': request})
+                return Response({
+                    "success": True,
+                    "message": "Post shared successfully",
+                    "data": post_serializer.data
+                }, status=status.HTTP_201_CREATED)
+        
+        # Create the Share record (for tracking share counts) - reference the original post
+        share = Share.objects.create(user=user, post=original_post)
+        
+        # Create a new Post that references the original post (not the intermediate shared post)
+        try:
+            shared_post = Post.objects.create(
+                user=user,
+                title='Shared Post',  # Simple title - not displayed in UI, original post title is shown instead
+                post_type='text',  # Shared posts are always text type
+                content='',  # Empty content, original post content is shown via original_post
+                shared_from=original_post,  # Always reference the original post, not the intermediate shared post
+                status='approved',  # Shared posts are auto-approved
+                community=original_post.community,  # Share in the same community if applicable
+            )
+        except Exception as e:
+            # If post creation fails, delete the share record
+            share.delete()
+            return Response({
+                "success": False,
+                "message": f"Failed to create shared post: {str(e)}",
+                "error": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        # Create notification for original post owner
+        if original_post.user != user:
+            from post.models import Notification
+            try:
+                Notification.objects.create(
+                    recipient=original_post.user,
+                    sender=user,
+                    notification_type='share',
+                    post=original_post
+                )
+            except Exception:
+                # Notification creation failure shouldn't break the share
+                pass
+        
+        # Return the shared post data
+        post_serializer = PostSerializer(shared_post, context={'request': request})
         headers = self.get_success_headers(serializer.data)
         return Response({
             "success": True,
             "message": "Post shared successfully",
-            "data": serializer.data
+            "data": post_serializer.data
         }, status=status.HTTP_201_CREATED, headers=headers)
 
     def list(self, request, *args, **kwargs):
@@ -1811,6 +2077,7 @@ class UnifiedReportsView(APIView):
         """Get all reports (post and user) - admin only"""
         from chats.models import UserReport
         from chats.serializers import UserReportSerializer
+        from datetime import datetime
         
         user = request.user
         
@@ -1818,15 +2085,69 @@ class UnifiedReportsView(APIView):
         if not (hasattr(user, 'role') and user.role == 'admin'):
             raise PermissionDenied("Only admins can view all reports.")
         
+        # Get filter parameters
+        status_filter = request.query_params.get('status', None)
+        start_date = request.query_params.get('start_date', None)
+        end_date = request.query_params.get('end_date', None)
+        search_query = request.query_params.get('search', None)
+        
         # Get post reports
         post_reports = PostReport.objects.select_related(
             'reporter', 'post', 'post__user', 'reviewed_by'
-        ).order_by('-created_at')
+        )
         
         # Get user reports
         user_reports = UserReport.objects.select_related(
             'reporter', 'reported_user', 'reviewed_by'
-        ).order_by('-created_at')
+        )
+        
+        # Apply status filter if provided
+        if status_filter and status_filter != 'all':
+            post_reports = post_reports.filter(status=status_filter)
+            user_reports = user_reports.filter(status=status_filter)
+        
+        # Apply date filters if provided
+        if start_date:
+            try:
+                date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+                post_reports = post_reports.filter(created_at__date__gte=date_obj)
+                user_reports = user_reports.filter(created_at__date__gte=date_obj)
+            except (ValueError, TypeError):
+                pass
+        
+        if end_date:
+            try:
+                date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+                post_reports = post_reports.filter(created_at__date__lte=date_obj)
+                user_reports = user_reports.filter(created_at__date__lte=date_obj)
+            except (ValueError, TypeError):
+                pass
+        
+        # Apply search filter if provided
+        if search_query:
+            from django.db.models import Q
+            search_query = search_query.strip()
+            if search_query:
+                # Search in post reports: reporter username/email, post title/content, reason
+                post_reports = post_reports.filter(
+                    Q(reporter__username__icontains=search_query) |
+                    Q(reporter__email__icontains=search_query) |
+                    Q(post__title__icontains=search_query) |
+                    Q(post__content__icontains=search_query) |
+                    Q(reason__icontains=search_query)
+                )
+                # Search in user reports: reporter username/email, reported user username/email, reason
+                user_reports = user_reports.filter(
+                    Q(reporter__username__icontains=search_query) |
+                    Q(reporter__email__icontains=search_query) |
+                    Q(reported_user__username__icontains=search_query) |
+                    Q(reported_user__email__icontains=search_query) |
+                    Q(reason__icontains=search_query)
+                )
+        
+        # Order by created_at
+        post_reports = post_reports.order_by('-created_at')
+        user_reports = user_reports.order_by('-created_at')
         
         # Serialize both
         post_report_serializer = PostReportSerializer(post_reports, many=True, context={'request': request})
