@@ -20,7 +20,14 @@ urlpatterns = [
     path('password-reset/reset/', ResetPasswordView.as_view(), name='reset-password'),
     # Admin endpoints
     path('admin/users/', AdminUsersListView.as_view(), name='admin-users'),
+    path('admin/users/<int:user_id>/block/', AdminBlockUserView.as_view(), name='admin-block-user'),
+    path('admin/users/<int:user_id>/unblock/', AdminBlockUserView.as_view(), name='admin-unblock-user'),
+    path('admin/users/<int:user_id>/delete/', AdminDeleteUserView.as_view(), name='admin-delete-user'),
     path('admin/dashboard-analytics/', DashboardAnalyticsView.as_view(), name='dashboard-analytics'),
+    path('admin/post-analytics/', PostAnalyticsView.as_view(), name='post-analytics'),
+    path('admin/user-analytics/', UserAnalyticsView.as_view(), name='user-analytics'),
+    path('admin/communities/', AdminCommunitiesListView.as_view(), name='admin-communities'),
+    path('admin/communities/<int:community_id>/delete/', AdminDeleteCommunityView.as_view(), name='admin-delete-community'),
     # Public endpoints (for authenticated users)
     path('users/', PublicUsersListView.as_view(), name='public-users'),
 ]
