@@ -1585,10 +1585,10 @@ class ContactViewSet(viewsets.ModelViewSet):
     """ViewSet for Contact form submissions"""
     queryset = Contact.objects.all()
     serializer_class = ContactSerializer
-    http_method_names = ['get', 'post', 'patch', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     
     def get_permissions(self):
-        """Allow anyone to create contacts, but only admins can view/list"""
+        """Allow anyone to create contacts, but only admins can view/list/delete"""
         if self.action == 'create':
             permission_classes = [permissions.AllowAny]
         else:
@@ -1634,6 +1634,22 @@ class ContactViewSet(viewsets.ModelViewSet):
             "message": "Contact retrieved successfully",
             "data": serializer.data
         })
+    
+    def destroy(self, request, *args, **kwargs):
+        """Delete a contact submission (admin only)"""
+        try:
+            instance = self.get_object()
+            contact_name = f"{instance.first_name} {instance.last_name}"
+            self.perform_destroy(instance)
+            return Response({
+                "success": True,
+                "message": f"Contact from {contact_name} has been deleted successfully"
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            return Response({
+                "success": False,
+                "error": str(e)
+            }, status=status.HTTP_400_BAD_REQUEST)
     
     @action(detail=True, methods=['patch'])
     def mark_read(self, request, pk=None):

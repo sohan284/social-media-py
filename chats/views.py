@@ -816,3 +816,22 @@ class UpdateReportStatusView(APIView):
             "success": False,
             "error": "Invalid status"
         }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class DeleteUserReportView(APIView):
+    """Delete a user report (admin only)"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def delete(self, request, report_id):
+        try:
+            report = UserReport.objects.get(id=report_id)
+            report.delete()
+            return Response({
+                "success": True,
+                "message": "Report deleted successfully"
+            }, status=status.HTTP_200_OK)
+        except UserReport.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Report not found"
+            }, status=status.HTTP_404_NOT_FOUND)

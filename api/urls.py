@@ -51,6 +51,7 @@ urlpatterns = [
     path('chat/report/', ReportUserView.as_view(), name='report-user'),
     path('chat/reports/', UserReportsListView.as_view(), name='user-reports-list'),
     path('chat/reports/<int:report_id>/update/', UpdateReportStatusView.as_view(), name='update-report-status'),
+    path('chat/reports/<int:report_id>/', DeleteUserReportView.as_view(), name='delete-user-report'),
     # Unified reports endpoint (must import UnifiedReportsView from post.views)
     path('reports/all/', UnifiedReportsView.as_view(), name='unified-reports'),
     # Router URLs (must be last to avoid conflicts with specific paths)
