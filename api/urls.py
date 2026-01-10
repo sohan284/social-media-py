@@ -42,6 +42,8 @@ urlpatterns = [
     path('chat/users/search/', ChatUserSearchView.as_view(), name='chat-user-search'),
     # Direct messaging endpoints
     path('chat/messages/send/', SendDirectMessageView.as_view(), name='send-direct-message'),
+    path('chat/messages/update/', UpdateDirectMessageView.as_view(), name='update-direct-message'),
+    path('chat/messages/delete/', DeleteDirectMessageView.as_view(), name='delete-direct-message'),
     path('chat/messages/conversation/', GetConversationView.as_view(), name='get-conversation'),
     path('chat/messages/conversations/', GetConversationsListView.as_view(), name='get-conversations-list'),
     # Block and Report endpoints
@@ -52,6 +54,9 @@ urlpatterns = [
     path('chat/reports/', UserReportsListView.as_view(), name='user-reports-list'),
     path('chat/reports/<int:report_id>/update/', UpdateReportStatusView.as_view(), name='update-report-status'),
     path('chat/reports/<int:report_id>/', DeleteUserReportView.as_view(), name='delete-user-report'),
+    # Admin conversations endpoints
+    path('chat/admin/conversations/', AdminAllConversationsView.as_view(), name='admin-all-conversations'),
+    path('chat/admin/conversation/messages/', AdminGetConversationMessagesView.as_view(), name='admin-conversation-messages'),
     # Unified reports endpoint (must import UnifiedReportsView from post.views)
     path('reports/all/', UnifiedReportsView.as_view(), name='unified-reports'),
     # Router URLs (must be last to avoid conflicts with specific paths)

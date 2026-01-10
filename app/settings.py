@@ -118,6 +118,16 @@ MIDDLEWARE = [
     'allauth.account.middleware.AccountMiddleware',
 ]
 
+# CSRF settings for API
+CSRF_TRUSTED_ORIGINS = [
+    'http://localhost:3000',
+    'http://localhost:3001',
+    'http://127.0.0.1:3000',
+    'http://127.0.0.1:3001',
+    'http://localhost:3002',
+    'http://127.0.0.1:3002',
+]
+
 # CORS settings
 CORS_ALLOW_ALL_ORIGINS = True
 CORS_ALLOW_CREDENTIALS = True
@@ -154,15 +164,15 @@ CORS_EXPOSE_HEADERS = [
     'authorization',
 ]
 
-# Ensure CORS middleware handles all origins (optional, since CORS_ALLOW_ALL_ORIGINS is True)
+# Ensure CORS middleware handles all origins
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://127.0.0.1:3000",
     "http://127.0.0.1:3001",
+    "http://localhost:3002",
+    "http://127.0.0.1:3002",
 ]
-
-# If CORS_ALLOW_ALL_ORIGINS is True, the above is ignored, but keeping for reference
 
 ROOT_URLCONF = 'app.urls'
 
