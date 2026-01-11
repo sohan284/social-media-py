@@ -529,6 +529,44 @@ class PublicUsersListView(APIView):
         }, status=200)
 
 
+""" Public Stats View """
+class PublicStatsView(APIView):
+    """Get public statistics for About Us page - no authentication required"""
+    permission_classes = []  # Public endpoint
+    
+    def get(self, request):
+        """Get basic platform statistics"""
+        try:
+            # Count active users (users who have verified email)
+            total_users = User.objects.filter(email_verified=True).count()
+            
+            # Count approved posts (excluding shared posts)
+            total_posts = Post.objects.filter(
+                status='approved',
+                shared_from__isnull=True
+            ).count()
+            
+            # Count all communities
+            total_communities = Community.objects.count()
+            
+            return Response({
+                "success": True,
+                "message": "Public statistics retrieved successfully",
+                "data": {
+                    "total_users": total_users,
+                    "total_posts": total_posts,
+                    "total_communities": total_communities,
+                }
+            }, status=200)
+        except Exception as e:
+            logger.error(f"Error in PublicStatsView: {str(e)}", exc_info=True)
+            return Response({
+                "success": False,
+                "message": "Error retrieving public statistics",
+                "error": str(e)
+            }, status=500)
+
+
 class DashboardAnalyticsView(APIView):
     """Get comprehensive dashboard analytics for admin panel"""
     permission_classes = [permissions.IsAuthenticated, IsAdmin]

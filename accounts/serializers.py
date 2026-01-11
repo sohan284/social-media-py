@@ -60,13 +60,14 @@ class AdminUserSerializer(serializers.ModelSerializer):
     display_name = serializers.SerializerMethodField(read_only=True)
     posts_count = serializers.SerializerMethodField(read_only=True)
     interests_count = serializers.SerializerMethodField(read_only=True)
+    interests = serializers.SerializerMethodField(read_only=True)
     
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'avatar', 'display_name', 
             'role', 'is_active', 'date_joined', 'last_login',
-            'posts_count', 'interests_count'
+            'posts_count', 'interests_count', 'interests'
         ]
     
     def get_avatar(self, obj):
@@ -100,6 +101,27 @@ class AdminUserSerializer(serializers.ModelSerializer):
             return obj.profile.subcategories.count()
         except Profile.DoesNotExist:
             return 0
+    
+    def get_interests(self, obj):
+        """Get interests grouped by category for this user"""
+        try:
+            interests_by_category = {}
+            subcategories = obj.profile.subcategories.select_related('category').all()
+            
+            for sub in subcategories:
+                category_name = sub.category.name
+                if category_name not in interests_by_category:
+                    interests_by_category[category_name] = []
+                interests_by_category[category_name].append({
+                    'id': sub.id,
+                    'name': sub.name
+                })
+            
+            return interests_by_category
+        except Profile.DoesNotExist:
+            return {}
+        except:
+            return {}
 
 class SendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()

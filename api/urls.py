@@ -57,6 +57,7 @@ urlpatterns = [
     # Admin conversations endpoints
     path('chat/admin/conversations/', AdminAllConversationsView.as_view(), name='admin-all-conversations'),
     path('chat/admin/conversation/messages/', AdminGetConversationMessagesView.as_view(), name='admin-conversation-messages'),
+    path('chat/admin/conversation/delete/', AdminDeleteConversationView.as_view(), name='admin-delete-conversation'),
     # Unified reports endpoint (must import UnifiedReportsView from post.views)
     path('reports/all/', UnifiedReportsView.as_view(), name='unified-reports'),
     # Router URLs (must be last to avoid conflicts with specific paths)

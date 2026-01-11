@@ -1366,3 +1366,73 @@ class AdminGetConversationMessagesView(APIView):
                 "success": False,
                 "error": "type must be 'direct' or 'room'"
             }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminDeleteConversationView(APIView):
+    """Delete a conversation (direct or room) - admin only"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def delete(self, request):
+        """Delete a conversation - admin only"""
+        conversation_type = request.query_params.get('type')  # 'direct' or 'room'
+        user1_id = request.query_params.get('user1_id')
+        user2_id = request.query_params.get('user2_id')
+        room_id = request.query_params.get('room_id')
+        
+        if conversation_type == 'direct':
+            if not user1_id or not user2_id:
+                return Response({
+                    "success": False,
+                    "error": "user1_id and user2_id are required for direct conversations"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                user1 = User.objects.get(id=user1_id)
+                user2 = User.objects.get(id=user2_id)
+            except User.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "error": "One or both users not found"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Delete all messages between these two users
+            deleted_count = Message.objects.filter(
+                Q(sender=user1, receiver=user2) | Q(sender=user2, receiver=user1),
+                room__isnull=True
+            ).delete()[0]
+            
+            return Response({
+                "success": True,
+                "message": f"Deleted {deleted_count} message(s) from the conversation",
+                "deleted_count": deleted_count
+            })
+        
+        elif conversation_type == 'room':
+            if not room_id:
+                return Response({
+                    "success": False,
+                    "error": "room_id is required for room conversations"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                room = Room.objects.get(id=room_id)
+                room_name = room.name or f"Room {room.id}"
+                
+                # Delete the room (this will cascade delete all messages)
+                room.delete()
+                
+                return Response({
+                    "success": True,
+                    "message": f"Room '{room_name}' and all its messages have been deleted"
+                })
+            except Room.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "error": "Room not found"
+                }, status=status.HTTP_404_NOT_FOUND)
+        
+        else:
+            return Response({
+                "success": False,
+                "error": "type must be 'direct' or 'room'"
+            }, status=status.HTTP_400_BAD_REQUEST)
