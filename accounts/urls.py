@@ -30,4 +30,6 @@ urlpatterns = [
     path('admin/communities/<int:community_id>/delete/', AdminDeleteCommunityView.as_view(), name='admin-delete-community'),
     # Public endpoints (for authenticated users)
     path('users/', PublicUsersListView.as_view(), name='public-users'),
+    # Public stats endpoint (no authentication required)
+    path('public/stats/', PublicStatsView.as_view(), name='public-stats'),
 ]
