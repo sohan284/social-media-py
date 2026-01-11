@@ -508,13 +508,34 @@ class PostViewSet(viewsets.ModelViewSet):
         """
         user = request.user
         
-        # For unauthenticated users, return general approved posts
+        # For unauthenticated users, return randomized approved posts with pagination
         if not user.is_authenticated:
-            approved_posts = Post.objects.filter(status='approved').select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
+            # Get all approved posts
+            approved_posts = list(Post.objects.filter(status='approved').select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
                 'likes', 'comments', 'shares'
-            ).order_by('-created_at')[:50]
+            ))
             
-            serializer = PostSerializer(approved_posts, many=True, context={'request': request})
+            # Randomize posts on each request
+            random.shuffle(approved_posts)
+            
+            # Set pagination page size to 20
+            page_size = 20
+            if hasattr(self, 'pagination_class') and self.pagination_class:
+                original_page_size = getattr(self.pagination_class, 'page_size', 10)
+                self.pagination_class.page_size = page_size
+            
+            # Paginate the randomized posts
+            page = self.paginate_queryset(approved_posts)
+            if page is not None:
+                serializer = PostSerializer(page, many=True, context={'request': request})
+                return self.get_paginated_response({
+                    "success": True,
+                    "message": "News feed retrieved successfully",
+                    "data": serializer.data
+                })
+            
+            # Fallback if pagination is not configured
+            serializer = PostSerializer(approved_posts[:page_size], many=True, context={'request': request})
             return Response({
                 "success": True,
                 "message": "News feed retrieved successfully",
@@ -901,6 +922,12 @@ class PostViewSet(viewsets.ModelViewSet):
             # If PostView model doesn't exist or there's an error, skip view tracking
             pass
         
+        # Set pagination page size to 20 for news feed
+        page_size = 20
+        if hasattr(self, 'pagination_class') and self.pagination_class:
+            original_page_size = getattr(self.pagination_class, 'page_size', 10)
+            self.pagination_class.page_size = page_size
+        
         # Paginate
         try:
             page = self.paginate_queryset(final_feed)
@@ -912,7 +939,8 @@ class PostViewSet(viewsets.ModelViewSet):
                     "data": serializer.data
                 })
             
-            serializer = self.get_serializer(final_feed, many=True, context={'request': request})
+            # Fallback: return first 20 posts if pagination not configured
+            serializer = self.get_serializer(final_feed[:page_size], many=True, context={'request': request})
             return Response({
                 "success": True,
                 "message": "News feed retrieved successfully",
@@ -980,6 +1008,12 @@ class PostViewSet(viewsets.ModelViewSet):
             'likes', 'comments', 'shares'
         ).order_by('-is_pinned', '-created_at')
         
+        # Set pagination page size to 20 for community posts
+        page_size = 20
+        if hasattr(self, 'pagination_class') and self.pagination_class:
+            original_page_size = getattr(self.pagination_class, 'page_size', 10)
+            self.pagination_class.page_size = page_size
+        
         page = self.paginate_queryset(posts)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
@@ -989,7 +1023,8 @@ class PostViewSet(viewsets.ModelViewSet):
                 "data": serializer.data
             })
         
-        serializer = self.get_serializer(posts, many=True)
+        # Fallback: return first 20 posts if pagination not configured
+        serializer = self.get_serializer(posts[:page_size], many=True)
         return Response({
             "success": True,
             "message": "Community posts retrieved successfully",
@@ -1086,16 +1121,26 @@ class PostViewSet(viewsets.ModelViewSet):
         approved_posts = Post.objects.filter(
             user=request.user,
             status='approved'
-        ).select_related('community', 'shared_from', 'shared_from__user').order_by('-created_at')
+        ).select_related('community', 'shared_from', 'shared_from__user').prefetch_related(
+            'likes', 'comments', 'shares'
+        ).order_by('-created_at')
         
         # Get draft posts, ordered by created_at descending
         draft_posts = Post.objects.filter(
             user=request.user,
             status='draft'
-        ).select_related('community', 'shared_from', 'shared_from__user').order_by('-created_at')
+        ).select_related('community', 'shared_from', 'shared_from__user').prefetch_related(
+            'likes', 'comments', 'shares'
+        ).order_by('-created_at')
         
         # Combine: approved first, then drafts
         all_posts = list(approved_posts) + list(draft_posts)
+        
+        # Set pagination page size to 20 for my_posts
+        page_size = 20
+        if hasattr(self, 'pagination_class') and self.pagination_class:
+            original_page_size = getattr(self.pagination_class, 'page_size', 10)
+            self.pagination_class.page_size = page_size
         
         page = self.paginate_queryset(all_posts)
         if page is not None:
@@ -1105,7 +1150,9 @@ class PostViewSet(viewsets.ModelViewSet):
                 "message": "My posts retrieved successfully",
                 "data": serializer.data
             })
-        serializer = self.get_serializer(all_posts, many=True)
+        
+        # Fallback: return first 20 posts if pagination not configured
+        serializer = self.get_serializer(all_posts[:page_size], many=True)
         return Response({
             "success": True,
             "message": "My posts retrieved successfully",
@@ -1163,6 +1210,29 @@ class PostViewSet(viewsets.ModelViewSet):
             ).order_by('-created_at')
             
             all_posts = list(approved_posts) + list(draft_posts)
+            
+            # Set pagination page size to 20 for user_posts
+            page_size = 20
+            if hasattr(self, 'pagination_class') and self.pagination_class:
+                original_page_size = getattr(self.pagination_class, 'page_size', 10)
+                self.pagination_class.page_size = page_size
+            
+            page = self.paginate_queryset(all_posts)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response({
+                    "success": True,
+                    "message": "User posts retrieved successfully",
+                    "data": serializer.data
+                })
+            
+            # Fallback: return first 20 posts if pagination not configured
+            serializer = self.get_serializer(all_posts[:page_size], many=True)
+            return Response({
+                "success": True,
+                "message": "User posts retrieved successfully",
+                "data": serializer.data
+            })
         else:
             # For other users: only show approved posts
             all_posts = Post.objects.filter(
@@ -1171,22 +1241,29 @@ class PostViewSet(viewsets.ModelViewSet):
             ).select_related('user', 'community', 'shared_from', 'shared_from__user').prefetch_related(
                 'likes', 'comments', 'shares'
             ).order_by('-created_at')
-        
-        page = self.paginate_queryset(all_posts)
-        if page is not None:
-            serializer = self.get_serializer(page, many=True)
-            return self.get_paginated_response({
+            
+            # Set pagination page size to 20 for user_posts
+            page_size = 20
+            if hasattr(self, 'pagination_class') and self.pagination_class:
+                original_page_size = getattr(self.pagination_class, 'page_size', 10)
+                self.pagination_class.page_size = page_size
+            
+            page = self.paginate_queryset(all_posts)
+            if page is not None:
+                serializer = self.get_serializer(page, many=True)
+                return self.get_paginated_response({
+                    "success": True,
+                    "message": "User posts retrieved successfully",
+                    "data": serializer.data
+                })
+            
+            # Fallback: return first 20 posts if pagination not configured
+            serializer = self.get_serializer(all_posts[:page_size], many=True)
+            return Response({
                 "success": True,
                 "message": "User posts retrieved successfully",
                 "data": serializer.data
             })
-        
-        serializer = self.get_serializer(all_posts, many=True)
-        return Response({
-            "success": True,
-            "message": "User posts retrieved successfully",
-            "data": serializer.data
-        })
         
 class LikeViewSet(viewsets.ModelViewSet):
     """ Viewset for Like """
@@ -1824,7 +1901,7 @@ class PostReportViewSet(viewsets.ModelViewSet):
     queryset = PostReport.objects.all()
     serializer_class = PostReportSerializer
     permission_classes = [permissions.IsAuthenticated]
-    http_method_names = ['get', 'post', 'head', 'options', 'patch']
+    http_method_names = ['get', 'post', 'head', 'options', 'patch', 'delete']
 
     def get_queryset(self):
         # Handle Swagger schema generation
@@ -1897,6 +1974,21 @@ class PostReportViewSet(viewsets.ModelViewSet):
             # Re-raise if it's a different integrity error
             raise
 
+    def destroy(self, request, *args, **kwargs):
+        """Delete a report (admin only)"""
+        instance = self.get_object()
+        user = request.user
+        
+        # Only admin can delete reports
+        if not (hasattr(user, 'role') and user.role == 'admin'):
+            raise PermissionDenied("Only admins can delete reports.")
+        
+        self.perform_destroy(instance)
+        return Response({
+            "success": True,
+            "message": "Report deleted successfully"
+        }, status=status.HTTP_200_OK)
+
     @action(detail=True, methods=['patch'])
     def review(self, request, pk=None):
         """Admin action to review a report"""
@@ -1930,7 +2022,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
     queryset = Notification.objects.all()
     serializer_class = NotificationSerializer
     permission_classes = [permissions.IsAuthenticated]
-    http_method_names = ['get', 'patch', 'delete', 'head', 'options']
+    http_method_names = ['get', 'post', 'patch', 'delete', 'head', 'options']
     
     def get_queryset(self):
         """Get notifications for current user"""
@@ -1945,6 +2037,13 @@ class NotificationViewSet(viewsets.ModelViewSet):
     def list(self, request, *args, **kwargs):
         """Get all notifications for current user"""
         queryset = self.get_queryset()
+        
+        # Set pagination page size to 20 for notifications
+        page_size = 20
+        if hasattr(self, 'pagination_class') and self.pagination_class:
+            original_page_size = getattr(self.pagination_class, 'page_size', 10)
+            self.pagination_class.page_size = page_size
+        
         page = self.paginate_queryset(queryset)
         if page is not None:
             serializer = self.get_serializer(page, many=True)
@@ -1954,7 +2053,8 @@ class NotificationViewSet(viewsets.ModelViewSet):
                 "data": serializer.data
             })
         
-        serializer = self.get_serializer(queryset, many=True)
+        # Fallback: return first 20 notifications if pagination not configured
+        serializer = self.get_serializer(queryset[:page_size], many=True)
         return Response({
             "success": True,
             "message": "Notifications retrieved successfully",

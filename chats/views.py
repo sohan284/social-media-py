@@ -2,7 +2,7 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.db.models import Q, Max
+from django.db.models import Q, Max, Count
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from .models import Room, Message, BlockedUser, UserReport
@@ -216,6 +216,130 @@ class RoomViewSet(viewsets.ModelViewSet):
             "message": "Message sent successfully",
             "data": serializer.data
         }, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['patch'])
+    def update_message(self, request, pk=None):
+        """Update a message in a room (only sender can update)"""
+        room = self.get_object()
+        if request.user not in room.participants.all():
+            return Response({
+                "success": False,
+                "error": "You don't have access to this room"
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        message_id = request.data.get('message_id')
+        content = request.data.get('content', '').strip()
+        
+        if not message_id:
+            return Response({
+                "success": False,
+                "error": "message_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not content:
+            return Response({
+                "success": False,
+                "error": "Message content is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message = Message.objects.get(id=message_id, room=room)
+        except Message.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Message not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Only sender can update their message
+        if message.sender != request.user:
+            return Response({
+                "success": False,
+                "error": "You can only edit your own messages"
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        message.content = content
+        message.save()
+        
+        # Broadcast update via WebSocket
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            async_to_sync(channel_layer.group_send)(
+                f'chat_{room.id}',
+                {
+                    'type': 'message_updated',
+                    'message': {
+                        'id': message.id,
+                        'content': message.content,
+                        'room_id': room.id,
+                    }
+                }
+            )
+        
+        serializer = MessageSerializer(message, context={'request': request})
+        return Response({
+            "success": True,
+            "message": "Message updated successfully",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['delete'])
+    def delete_message(self, request, pk=None):
+        """Delete a message from a room (only sender can delete)"""
+        room = self.get_object()
+        if request.user not in room.participants.all():
+            return Response({
+                "success": False,
+                "error": "You don't have access to this room"
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        message_id = request.query_params.get('message_id') or request.data.get('message_id')
+        
+        if not message_id:
+            return Response({
+                "success": False,
+                "error": "message_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message = Message.objects.get(id=message_id, room=room)
+        except Message.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Message not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Only sender can delete their message
+        if message.sender != request.user:
+            return Response({
+                "success": False,
+                "error": "You can only delete your own messages"
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        message_id_for_ws = message.id
+        message.delete()
+        
+        # Broadcast deletion via WebSocket
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            async_to_sync(channel_layer.group_send)(
+                f'chat_{room.id}',
+                {
+                    'type': 'message_deleted',
+                    'message_id': message_id_for_ws,
+                    'room_id': room.id,
+                }
+            )
+        
+        return Response({
+            "success": True,
+            "message": "Message deleted successfully"
+        }, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'])
     def add_members(self, request, pk=None):
@@ -533,6 +657,138 @@ class SendDirectMessageView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+class UpdateDirectMessageView(APIView):
+    """Update a direct message (only sender can update)"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def patch(self, request):
+        message_id = request.data.get('message_id')
+        content = request.data.get('content', '').strip()
+        
+        if not message_id:
+            return Response({
+                "success": False,
+                "error": "message_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if not content:
+            return Response({
+                "success": False,
+                "error": "Message content is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message = Message.objects.get(id=message_id, sender=request.user)
+        except Message.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Message not found or you don't have permission to edit it"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        message.content = content
+        message.save()
+        
+        # Broadcast update via WebSocket
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            # Send to receiver
+            if message.receiver:
+                async_to_sync(channel_layer.group_send)(
+                    f'user_{message.receiver.id}',
+                    {
+                        'type': 'message_updated',
+                        'message': {
+                            'id': message.id,
+                            'content': message.content,
+                            'sender_id': request.user.id,
+                            'receiver_id': message.receiver.id,
+                        }
+                    }
+                )
+            # Send to sender
+            async_to_sync(channel_layer.group_send)(
+                f'user_{request.user.id}',
+                {
+                    'type': 'message_updated',
+                    'message': {
+                        'id': message.id,
+                        'content': message.content,
+                        'sender_id': request.user.id,
+                        'receiver_id': message.receiver.id if message.receiver else None,
+                    }
+                }
+            )
+        
+        serializer = MessageSerializer(message, context={'request': request})
+        return Response({
+            "success": True,
+            "message": "Message updated successfully",
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class DeleteDirectMessageView(APIView):
+    """Delete a direct message (only sender can delete)"""
+    permission_classes = [permissions.IsAuthenticated]
+
+    def delete(self, request):
+        message_id = request.query_params.get('message_id') or request.data.get('message_id')
+        
+        if not message_id:
+            return Response({
+                "success": False,
+                "error": "message_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message = Message.objects.get(id=message_id, sender=request.user)
+        except Message.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Message not found or you don't have permission to delete it"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        receiver_id = message.receiver.id if message.receiver else None
+        message_id_for_ws = message.id
+        message.delete()
+        
+        # Broadcast deletion via WebSocket
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            # Send to receiver
+            if receiver_id:
+                async_to_sync(channel_layer.group_send)(
+                    f'user_{receiver_id}',
+                    {
+                        'type': 'message_deleted',
+                        'message_id': message_id_for_ws,
+                        'sender_id': request.user.id,
+                        'receiver_id': receiver_id,
+                    }
+                )
+            # Send to sender
+            async_to_sync(channel_layer.group_send)(
+                f'user_{request.user.id}',
+                {
+                    'type': 'message_deleted',
+                    'message_id': message_id_for_ws,
+                    'sender_id': request.user.id,
+                    'receiver_id': receiver_id,
+                }
+            )
+        
+        return Response({
+            "success": True,
+            "message": "Message deleted successfully"
+        }, status=status.HTTP_200_OK)
+
+
 class GetConversationView(APIView):
     """Get conversation messages between current user and another user"""
     permission_classes = [permissions.IsAuthenticated]
@@ -816,3 +1072,367 @@ class UpdateReportStatusView(APIView):
             "success": False,
             "error": "Invalid status"
         }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class DeleteUserReportView(APIView):
+    """Delete a user report (admin only)"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def delete(self, request, report_id):
+        try:
+            report = UserReport.objects.get(id=report_id)
+            report.delete()
+            return Response({
+                "success": True,
+                "message": "Report deleted successfully"
+            }, status=status.HTTP_200_OK)
+        except UserReport.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Report not found"
+            }, status=status.HTTP_404_NOT_FOUND)
+
+
+class AdminAllConversationsView(APIView):
+    """Get all conversations (direct and room) for admin panel"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def get(self, request):
+        """Get all conversations - both direct messages and room messages with pagination"""
+        try:
+            # Get pagination parameters
+            page = int(request.query_params.get('page', 1))
+            limit = int(request.query_params.get('limit', 10))
+            
+            # Get filter parameters
+            type_filter = request.query_params.get('type', None)
+            search_query = request.query_params.get('search', None)
+            
+            # Validate pagination parameters
+            if page < 1:
+                page = 1
+            if limit < 1:
+                limit = 10
+            if limit > 100:
+                limit = 100  # Max limit
+            
+            # Get all direct message conversations
+            # Get unique pairs of users who have exchanged messages
+            direct_conversations = []
+            user_pairs = Message.objects.filter(
+                room__isnull=True
+            ).exclude(
+                sender__isnull=True
+            ).exclude(
+                receiver__isnull=True
+            ).values_list('sender_id', 'receiver_id').distinct()
+            
+            # Process each user pair
+            processed_pairs = set()
+            for sender_id, receiver_id in user_pairs:
+                # Create a consistent key for the pair (smaller_id, larger_id)
+                pair_key = tuple(sorted([sender_id, receiver_id]))
+                if pair_key in processed_pairs:
+                    continue
+                processed_pairs.add(pair_key)
+                
+                user1_id, user2_id = pair_key
+                try:
+                    user1 = User.objects.get(id=user1_id)
+                    user2 = User.objects.get(id=user2_id)
+                    
+                    # Get last message between these users
+                    last_message = Message.objects.filter(
+                        Q(sender=user1, receiver=user2) | Q(sender=user2, receiver=user1),
+                        room__isnull=True
+                    ).select_related('sender', 'receiver').order_by('-created_at').first()
+                    
+                    # Get message count
+                    message_count = Message.objects.filter(
+                        Q(sender=user1, receiver=user2) | Q(sender=user2, receiver=user1),
+                        room__isnull=True
+                    ).count()
+                    
+                    # Format created_at safely
+                    created_at_str = None
+                    if last_message and last_message.created_at:
+                        created_at_str = last_message.created_at.isoformat()
+                    
+                    direct_conversations.append({
+                        'id': f'direct_{user1_id}_{user2_id}',
+                        'type': 'direct',
+                        'user1': UserSerializer(user1, context={'request': request}).data,
+                        'user2': UserSerializer(user2, context={'request': request}).data,
+                        'last_message': MessageSerializer(last_message, context={'request': request}).data if last_message else None,
+                        'message_count': message_count,
+                        'created_at': created_at_str,
+                    })
+                except User.DoesNotExist:
+                    continue
+                except Exception as e:
+                    # Log error but continue processing
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"Error processing direct conversation pair {pair_key}: {str(e)}")
+                    continue
+            
+            # Get all room conversations
+            rooms = Room.objects.all().annotate(
+                message_count=Count('messages'),
+                last_message_time=Max('messages__created_at')
+            ).prefetch_related('participants', 'admins')
+            
+            # Order by last_message_time (nulls last) and created_at
+            rooms = rooms.order_by('-last_message_time', '-created_at')
+            
+            room_conversations = []
+            for room in rooms:
+                try:
+                    last_message = room.messages.select_related('sender').order_by('-created_at').first()
+                    
+                    # Format created_at safely
+                    created_at_str = None
+                    if last_message and last_message.created_at:
+                        created_at_str = last_message.created_at.isoformat()
+                    elif room.created_at:
+                        created_at_str = room.created_at.isoformat()
+                    
+                    room_conversations.append({
+                        'id': f'room_{room.id}',
+                        'type': 'room',
+                        'room_id': room.id,
+                        'name': room.name,
+                        'is_group': room.is_group,
+                        'participants': UserSerializer(room.participants.all(), many=True, context={'request': request}).data,
+                        'admins': UserSerializer(room.admins.all(), many=True, context={'request': request}).data,
+                        'last_message': MessageSerializer(last_message, context={'request': request}).data if last_message else None,
+                        'message_count': room.message_count or 0,
+                        'created_at': created_at_str,
+                    })
+                except Exception as e:
+                    # Log error but continue processing
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.error(f"Error processing room {room.id}: {str(e)}")
+                    continue
+            
+            # Combine and sort by last message time
+            all_conversations = direct_conversations + room_conversations
+            all_conversations.sort(key=lambda x: x.get('created_at') or '', reverse=True)
+            
+            # Apply type filter
+            if type_filter and type_filter != 'all':
+                all_conversations = [c for c in all_conversations if c.get('type') == type_filter]
+            
+            # Apply search filter
+            if search_query:
+                search_query = search_query.strip().lower()
+                if search_query:
+                    filtered_conversations = []
+                    for conv in all_conversations:
+                        if conv.get('type') == 'direct':
+                            user1 = conv.get('user1', {})
+                            user2 = conv.get('user2', {})
+                            user1_name = (user1.get('display_name') or user1.get('username') or '').lower()
+                            user2_name = (user2.get('display_name') or user2.get('username') or '').lower()
+                            user1_email = (user1.get('email') or '').lower()
+                            user2_email = (user2.get('email') or '').lower()
+                            if (search_query in user1_name or search_query in user2_name or 
+                                search_query in user1_email or search_query in user2_email):
+                                filtered_conversations.append(conv)
+                        else:  # room
+                            room_name = (conv.get('name') or '').lower()
+                            participants = conv.get('participants', [])
+                            participant_names = [
+                                (p.get('display_name') or p.get('username') or '').lower()
+                                for p in participants
+                            ]
+                            if (search_query in room_name or 
+                                any(search_query in name for name in participant_names)):
+                                filtered_conversations.append(conv)
+                    all_conversations = filtered_conversations
+            
+            # Apply pagination
+            total_count = len(all_conversations)
+            start_index = (page - 1) * limit
+            end_index = start_index + limit
+            paginated_conversations = all_conversations[start_index:end_index]
+            
+            # Calculate pagination info
+            total_pages = (total_count + limit - 1) // limit  # Ceiling division
+            has_next = page < total_pages
+            has_previous = page > 1
+            next_page = page + 1 if has_next else None
+            previous_page = page - 1 if has_previous else None
+            
+            # Build next and previous URLs
+            base_url = request.build_absolute_uri(request.path)
+            next_url = None
+            previous_url = None
+            
+            if next_page:
+                next_url = f"{base_url}?page={next_page}&limit={limit}"
+            if previous_page:
+                previous_url = f"{base_url}?page={previous_page}&limit={limit}"
+            
+            return Response({
+                "count": total_count,
+                "next": next_url,
+                "previous": previous_url,
+                "results": {
+                    "success": True,
+                    "data": paginated_conversations
+                }
+            })
+        except Exception as e:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.error(f"Error in AdminAllConversationsView: {str(e)}")
+            return Response({
+                "success": False,
+                "error": str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class AdminGetConversationMessagesView(APIView):
+    """Get conversation messages for admin panel - can view any conversation"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def get(self, request):
+        """Get messages for a conversation (direct or room) - admin only"""
+        conversation_type = request.query_params.get('type')  # 'direct' or 'room'
+        user1_id = request.query_params.get('user1_id')
+        user2_id = request.query_params.get('user2_id')
+        room_id = request.query_params.get('room_id')
+        
+        if conversation_type == 'direct':
+            if not user1_id or not user2_id:
+                return Response({
+                    "success": False,
+                    "error": "user1_id and user2_id are required for direct conversations"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                user1 = User.objects.get(id=user1_id)
+                user2 = User.objects.get(id=user2_id)
+            except User.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "error": "One or both users not found"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Get all messages between these two users
+            messages = Message.objects.filter(
+                Q(sender=user1, receiver=user2) | Q(sender=user2, receiver=user1),
+                room__isnull=True
+            ).select_related('sender', 'receiver').order_by('created_at')
+            
+            serializer = MessageSerializer(messages, many=True, context={'request': request})
+            
+            return Response({
+                "success": True,
+                "data": serializer.data
+            })
+        
+        elif conversation_type == 'room':
+            if not room_id:
+                return Response({
+                    "success": False,
+                    "error": "room_id is required for room conversations"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                room = Room.objects.get(id=room_id)
+            except Room.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "error": "Room not found"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Get all messages in this room
+            messages = Message.objects.filter(
+                room=room
+            ).select_related('sender', 'room').order_by('created_at')
+            
+            serializer = MessageSerializer(messages, many=True, context={'request': request})
+            
+            return Response({
+                "success": True,
+                "data": serializer.data
+            })
+        
+        else:
+            return Response({
+                "success": False,
+                "error": "type must be 'direct' or 'room'"
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+
+class AdminDeleteConversationView(APIView):
+    """Delete a conversation (direct or room) - admin only"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+    
+    def delete(self, request):
+        """Delete a conversation - admin only"""
+        conversation_type = request.query_params.get('type')  # 'direct' or 'room'
+        user1_id = request.query_params.get('user1_id')
+        user2_id = request.query_params.get('user2_id')
+        room_id = request.query_params.get('room_id')
+        
+        if conversation_type == 'direct':
+            if not user1_id or not user2_id:
+                return Response({
+                    "success": False,
+                    "error": "user1_id and user2_id are required for direct conversations"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                user1 = User.objects.get(id=user1_id)
+                user2 = User.objects.get(id=user2_id)
+            except User.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "error": "One or both users not found"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # Delete all messages between these two users
+            deleted_count = Message.objects.filter(
+                Q(sender=user1, receiver=user2) | Q(sender=user2, receiver=user1),
+                room__isnull=True
+            ).delete()[0]
+            
+            return Response({
+                "success": True,
+                "message": f"Deleted {deleted_count} message(s) from the conversation",
+                "deleted_count": deleted_count
+            })
+        
+        elif conversation_type == 'room':
+            if not room_id:
+                return Response({
+                    "success": False,
+                    "error": "room_id is required for room conversations"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            try:
+                room = Room.objects.get(id=room_id)
+                room_name = room.name or f"Room {room.id}"
+                
+                # Delete the room (this will cascade delete all messages)
+                room.delete()
+                
+                return Response({
+                    "success": True,
+                    "message": f"Room '{room_name}' and all its messages have been deleted"
+                })
+            except Room.DoesNotExist:
+                return Response({
+                    "success": False,
+                    "error": "Room not found"
+                }, status=status.HTTP_404_NOT_FOUND)
+        
+        else:
+            return Response({
+                "success": False,
+                "error": "type must be 'direct' or 'room'"
+            }, status=status.HTTP_400_BAD_REQUEST)
