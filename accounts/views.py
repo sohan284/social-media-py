@@ -683,13 +683,11 @@ class DashboardAnalyticsView(APIView):
             sold_products = Product.objects.filter(status='sold').count()
             unpublished_products = Product.objects.filter(status='unpublished').count()
         
-            # Product price analytics
-            price_stats = Product.objects.filter(status='published').aggregate(
-                avg_price=Avg('price'),
-                max_price=Max('price'),
-                min_price=Min('price'),
-                total_value=Sum('price')
-            )
+            # Service analytics (replacing price stats)
+            services_with_links = Product.objects.filter(status='published', link__isnull=False).exclude(link='').count()
+            services_by_category = Product.objects.filter(status='published').values('sub_category__category__name').annotate(
+                count=Count('id')
+            ).order_by('-count')[:5]
         
             # ========== ACTIVITY TIMELINE (30 DAYS) ==========
             activity_data = []
@@ -911,12 +909,14 @@ class DashboardAnalyticsView(APIView):
                     "draft": draft_products,
                     "sold": sold_products,
                     "unpublished": unpublished_products,
-                    "price_stats": {
-                        "avg_price": float(price_stats['avg_price'] or 0),
-                        "max_price": float(price_stats['max_price'] or 0),
-                        "min_price": float(price_stats['min_price'] or 0),
-                        "total_value": float(price_stats['total_value'] or 0),
-                    },
+                    "services_with_links": services_with_links,
+                    "top_categories": [
+                        {
+                            "category": item['sub_category__category__name'] or "Uncategorized",
+                            "count": item['count']
+                        }
+                        for item in services_by_category
+                    ],
                 },
                 
                 # Activity timeline (30 days)
@@ -1114,6 +1114,90 @@ class UserAnalyticsView(APIView):
             return Response({
                 "success": False,
                 "message": "Error retrieving user analytics",
+                "error": str(e)
+            }, status=500)
+
+
+class ServiceAnalyticsView(APIView):
+    """Get filtered service promotion analytics based on date range"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        try:
+            from datetime import datetime
+            
+            # Get date range parameters
+            start_date_str = request.query_params.get('start_date')
+            end_date_str = request.query_params.get('end_date')
+            
+            now = timezone.now()
+            
+            # Parse dates or use defaults
+            if start_date_str:
+                try:
+                    start_date = timezone.make_aware(datetime.strptime(start_date_str, '%Y-%m-%d'))
+                except ValueError:
+                    start_date = now - timedelta(days=30)
+            else:
+                start_date = now - timedelta(days=30)
+            
+            if end_date_str:
+                try:
+                    end_date = timezone.make_aware(datetime.strptime(end_date_str, '%Y-%m-%d'))
+                    # Include the full end date
+                    end_date = end_date.replace(hour=23, minute=59, second=59)
+                except ValueError:
+                    end_date = now
+            else:
+                end_date = now
+            
+            # Ensure start_date is before end_date
+            if start_date > end_date:
+                start_date, end_date = end_date, start_date
+            
+            # Calculate number of days
+            days_diff = (end_date - start_date).days + 1
+            
+            # Limit to reasonable range (max 2 years)
+            if days_diff > 730:
+                days_diff = 730
+                start_date = end_date - timedelta(days=729)
+            
+            # Generate daily service analytics data
+            service_analytics = []
+            
+            for i in range(days_diff):
+                day_start = start_date + timedelta(days=i)
+                day_end = day_start + timedelta(days=1)
+                
+                # Service analytics - new services created per day
+                new_services = Product.objects.filter(
+                    created_at__gte=day_start,
+                    created_at__lt=day_end
+                ).count()
+                
+                service_analytics.append({
+                    'date': day_start.strftime('%Y-%m-%d'),
+                    'new': new_services,
+                })
+            
+            return Response({
+                "success": True,
+                "message": "Service analytics retrieved successfully",
+                "data": {
+                    "service_analytics": service_analytics,
+                    "date_range": {
+                        "start_date": start_date.strftime('%Y-%m-%d'),
+                        "end_date": end_date.strftime('%Y-%m-%d'),
+                        "days": days_diff,
+                    }
+                }
+            }, status=200)
+        except Exception as e:
+            logger.error(f"Error in ServiceAnalyticsView: {str(e)}", exc_info=True)
+            return Response({
+                "success": False,
+                "message": "Error retrieving service analytics",
                 "error": str(e)
             }, status=500)
 

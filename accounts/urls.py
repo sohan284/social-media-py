@@ -26,6 +26,7 @@ urlpatterns = [
     path('admin/dashboard-analytics/', DashboardAnalyticsView.as_view(), name='dashboard-analytics'),
     path('admin/post-analytics/', PostAnalyticsView.as_view(), name='post-analytics'),
     path('admin/user-analytics/', UserAnalyticsView.as_view(), name='user-analytics'),
+    path('admin/service-analytics/', ServiceAnalyticsView.as_view(), name='service-analytics'),
     path('admin/communities/', AdminCommunitiesListView.as_view(), name='admin-communities'),
     path('admin/communities/<int:community_id>/delete/', AdminDeleteCommunityView.as_view(), name='admin-delete-community'),
     # Public endpoints (for authenticated users)

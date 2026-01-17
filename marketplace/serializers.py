@@ -29,10 +29,11 @@ class ProductSerializer(serializers.ModelSerializer):
     category_name = serializers.CharField(source='sub_category.category.name', read_only=True)
     subcategory_name = serializers.CharField(source='sub_category.name', read_only=True)
     sub_category = serializers.PrimaryKeyRelatedField(queryset=SubCategory.objects.all(), write_only=True)
+    link = serializers.URLField(required=True, allow_blank=False)
 
     class Meta:
         model = Product
-        fields = ['id', 'name', 'image', 'price', 'condition', 'status', 'sub_category', 'user_name', 'category_name', 'subcategory_name', 'description', 'location', 'link', 'created_at', 'updated_at']
+        fields = ['id', 'name', 'image', 'status', 'sub_category', 'user_name', 'category_name', 'subcategory_name', 'description', 'location', 'link', 'created_at', 'updated_at']
 
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -51,8 +52,8 @@ class ProductListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Product
         fields = [
-            'id', 'user_name', 'name', 'image', 'price', 
-            'condition', 'status', 'sub_category_name', 
+            'id', 'user_name', 'name', 'image', 
+            'status', 'sub_category_name', 
             'category_name', 'description', 'location', 'link', 'created_at'
         ]
 
