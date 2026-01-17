@@ -12,9 +12,11 @@ from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q
 from rest_framework import filters
 from rest_framework.decorators import action
+import logging
 
 
 user = get_user_model()
+logger = logging.getLogger(__name__)
 
 # Create your views here.
 def success_response(message, data=None, code =status.HTTP_200_OK):
@@ -107,7 +109,7 @@ class MarketplaceProductViewSet(viewsets.ModelViewSet):
     queryset = Product.objects.all()
     permission_classes = [IsAuthenticatedOrReadOnly]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['status', 'condition', 'sub_category', 'sub_category__category']
+    filterset_fields = ['status', 'sub_category', 'sub_category__category']
     search_fields = ['name', 'description', 'location']
 
     def get_serializer_class(self):
@@ -176,13 +178,17 @@ class MarketplaceProductViewSet(viewsets.ModelViewSet):
         return success_response("Product retrieved successfully.", serializer.data)
 
     def create(self, request, *args, **kwargs):
-        serializer = self.get_serializer(data=request.data)
+        try:
+            serializer = self.get_serializer(data=request.data)
 
-        if serializer.is_valid():
-            serializer.save(user=request.user)
-            return success_response("Product created successfully.", serializer.data, status.HTTP_201_CREATED)
+            if serializer.is_valid():
+                serializer.save(user=request.user)
+                return success_response("Service created successfully.", serializer.data, status.HTTP_201_CREATED)
 
-        return error_response("Product creation failed.", serializer.errors)
+            return error_response("Service creation failed.", serializer.errors)
+        except Exception as e:
+            logger.error(f"Error creating service: {str(e)}", exc_info=True)
+            return error_response(f"Service creation failed: {str(e)}", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
     def update(self, request, pk=None, *args, **kwargs):
         product = get_object_or_404(self.get_queryset(), pk=pk)

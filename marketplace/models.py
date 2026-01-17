@@ -41,10 +41,6 @@ class SubCategory(models.Model):
         return super(SubCategory, self).save(*args, **kwargs)
 
 class Product(models.Model):
-    CONDITION_CHOICES = (
-        ('new', 'New'),
-        ('old', 'Old'),
-    )
     STATUS_CHOICES = (
         ('draft', 'Draft'),
         ('published', 'Published'),
@@ -55,13 +51,11 @@ class Product(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='products')
     name = models.CharField(max_length=255)
     image = models.ImageField(upload_to='products')
-    price = models.DecimalField(max_digits=10, decimal_places=2)
-    condition = models.CharField(max_length=10, choices=CONDITION_CHOICES, default='new')
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
     sub_category = models.ForeignKey(SubCategory, on_delete=models.CASCADE, related_name='products')
     description = models.TextField(null=True, blank=True)
     location = models.CharField(max_length=255, null=True, blank=True)
-    link = models.URLField(max_length=500, null=True, blank=True, help_text="Link to buy the product")
+    link = models.URLField(max_length=500, help_text="Link to the service platform")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
