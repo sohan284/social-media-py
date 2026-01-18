@@ -7,10 +7,38 @@ User = get_user_model()
 
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
+    stripe_product_id = serializers.CharField(read_only=True, allow_null=True)
+    stripe_price_id = serializers.CharField(read_only=True, allow_null=True)
+    
     class Meta:
         model = SubscriptionPlan
-        fields = ['id', 'name', 'display_name', 'price', 'posts_per_month', 'features', 'is_active']
-        read_only_fields = ['id']
+        fields = [
+            'id', 'name', 'display_name', 'price', 'posts_per_month', 
+            'features', 'is_active', 'is_recommended', 'stripe_product_id', 'stripe_price_id',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'stripe_product_id', 'stripe_price_id']
+    
+    def validate_name(self, value):
+        """Validate plan name is unique"""
+        if self.instance and self.instance.name == value:
+            return value
+        
+        if SubscriptionPlan.objects.filter(name=value).exists():
+            raise serializers.ValidationError("A plan with this name already exists.")
+        return value
+    
+    def validate_price(self, value):
+        """Validate price is non-negative"""
+        if value < 0:
+            raise serializers.ValidationError("Price cannot be negative.")
+        return value
+    
+    def validate_posts_per_month(self, value):
+        """Validate posts_per_month is non-negative"""
+        if value < 0:
+            raise serializers.ValidationError("Posts per month cannot be negative.")
+        return value
 
 
 class UserSubscriptionSerializer(serializers.ModelSerializer):
@@ -61,7 +89,8 @@ class PostCreditSerializer(serializers.ModelSerializer):
 class SubscriptionUsageSerializer(serializers.Serializer):
     """Serializer for subscription usage information"""
     has_subscription = serializers.BooleanField()
-    plan_name = serializers.CharField(allow_null=True)
+    plan_name = serializers.CharField(allow_null=True)  # Plan slug/name for matching
+    plan_display_name = serializers.CharField(allow_null=True)  # Plan display name for UI
     posts_used = serializers.IntegerField()
     posts_limit = serializers.IntegerField(allow_null=True)  # None means unlimited
     remaining_posts = serializers.IntegerField(allow_null=True)

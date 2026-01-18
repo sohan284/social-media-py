@@ -58,6 +58,11 @@ urlpatterns = [
     path('chat/messages/delete/', DeleteDirectMessageView.as_view(), name='delete-direct-message'),
     path('chat/messages/conversation/', GetConversationView.as_view(), name='get-conversation'),
     path('chat/messages/conversations/', GetConversationsListView.as_view(), name='get-conversations-list'),
+    # Message request endpoints
+    path('chat/message-requests/', GetMessageRequestsView.as_view(), name='get-message-requests'),
+    path('chat/message-requests/accept/', AcceptMessageRequestView.as_view(), name='accept-message-request'),
+    path('chat/message-requests/reject/', RejectMessageRequestView.as_view(), name='reject-message-request'),
+    path('chat/message-requests/cancel/', CancelMessageRequestView.as_view(), name='cancel-message-request'),
     # Block and Report endpoints
     path('chat/block/', BlockUserView.as_view(), name='block-user'),
     path('chat/unblock/', UnblockUserView.as_view(), name='unblock-user'),

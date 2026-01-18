@@ -18,9 +18,9 @@ class Command(BaseCommand):
                 'name': 'free',
                 'display_name': 'Free',
                 'price': 0.00,
-                'posts_per_month': 2,
+                'posts_per_month': 1,
                 'features': [
-                    '2 posts per month',
+                    '1 post per month',
                     'Basic support',
                     'Standard visibility'
                 ],

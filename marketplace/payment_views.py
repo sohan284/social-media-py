@@ -9,6 +9,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
+from accounts.permissions import IsAdmin
 from .models import SubscriptionPlan, UserSubscription, Payment, PostCredit
 from .payment_serializers import (
     SubscriptionPlanSerializer,
@@ -25,13 +26,22 @@ logger = logging.getLogger(__name__)
 stripe.api_key = settings.STRIPE_SECRET_KEY
 
 
-class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
-    """ViewSet for subscription plans (read-only for users)"""
+class SubscriptionPlanViewSet(viewsets.ModelViewSet):
+    """ViewSet for subscription plans - Admin can CRUD, users can only read active plans"""
     serializer_class = SubscriptionPlanSerializer
     permission_classes = [IsAuthenticated]
     
+    def get_permissions(self):
+        """Admin can do everything, regular users can only read"""
+        if self.action in ['create', 'update', 'partial_update', 'destroy']:
+            return [IsAdmin()]
+        return [IsAuthenticated()]
+    
     def get_queryset(self):
-        return SubscriptionPlan.objects.filter(is_active=True)
+        """Admin sees all plans, users see only active plans"""
+        if hasattr(self.request.user, 'role') and self.request.user.role == 'admin':
+            return SubscriptionPlan.objects.all().order_by('price')
+        return SubscriptionPlan.objects.filter(is_active=True).order_by('price')
     
     def list(self, request, *args, **kwargs):
         try:
@@ -41,6 +51,165 @@ class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception as e:
             logger.error(f"Error retrieving subscription plans: {str(e)}", exc_info=True)
             return error_response(f"Failed to retrieve plans: {str(e)}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def create(self, request, *args, **kwargs):
+        """Create a new subscription plan with Stripe integration"""
+        try:
+            serializer = self.get_serializer(data=request.data)
+            serializer.is_valid(raise_exception=True)
+            
+            plan_data = serializer.validated_data
+            price = plan_data.get('price', 0)
+            
+            # Create Stripe product and price if plan is not free
+            stripe_product_id = None
+            stripe_price_id = None
+            
+            if price > 0:
+                try:
+                    # Create Stripe product
+                    stripe_product = stripe.Product.create(
+                        name=plan_data.get('display_name'),
+                        description=f"{plan_data.get('display_name')} subscription plan",
+                        metadata={'plan_name': plan_data.get('name')}
+                    )
+                    stripe_product_id = stripe_product.id
+                    
+                    # Create Stripe price
+                    stripe_price = stripe.Price.create(
+                        product=stripe_product_id,
+                        unit_amount=int(float(price) * 100),  # Convert to cents
+                        currency='usd',
+                        recurring={'interval': 'month'},
+                        metadata={'plan_name': plan_data.get('name')}
+                    )
+                    stripe_price_id = stripe_price.id
+                except stripe.error.StripeError as e:
+                    logger.error(f"Stripe error creating plan: {str(e)}")
+                    return error_response(f"Failed to create Stripe product/price: {str(e)}", status.HTTP_400_BAD_REQUEST)
+            
+            # If this plan is marked as recommended, unmark other recommended plans
+            if plan_data.get('is_recommended', False):
+                SubscriptionPlan.objects.filter(is_recommended=True).update(is_recommended=False)
+            
+            # Create plan with Stripe IDs
+            plan = SubscriptionPlan.objects.create(
+                **plan_data,
+                stripe_product_id=stripe_product_id,
+                stripe_price_id=stripe_price_id
+            )
+            
+            serializer = self.get_serializer(plan)
+            return success_response("Subscription plan created successfully.", serializer.data, status.HTTP_201_CREATED)
+        except Exception as e:
+            logger.error(f"Error creating subscription plan: {str(e)}", exc_info=True)
+            return error_response(f"Failed to create plan: {str(e)}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def update(self, request, *args, **kwargs):
+        """Update subscription plan with Stripe integration"""
+        try:
+            instance = self.get_object()
+            serializer = self.get_serializer(instance, data=request.data, partial=False)
+            serializer.is_valid(raise_exception=True)
+            
+            plan_data = serializer.validated_data
+            price = plan_data.get('price', instance.price)
+            
+            # Update Stripe product/price if price changed and plan is not free
+            if price > 0:
+                try:
+                    # Update or create Stripe product
+                    if instance.stripe_product_id:
+                        stripe.Product.modify(
+                            instance.stripe_product_id,
+                            name=plan_data.get('display_name', instance.display_name),
+                            description=f"{plan_data.get('display_name', instance.display_name)} subscription plan"
+                        )
+                    else:
+                        stripe_product = stripe.Product.create(
+                            name=plan_data.get('display_name', instance.display_name),
+                            description=f"{plan_data.get('display_name', instance.display_name)} subscription plan",
+                            metadata={'plan_name': plan_data.get('name', instance.name)}
+                        )
+                        plan_data['stripe_product_id'] = stripe_product.id
+                    
+                    # If price changed, create new Stripe price and archive old one
+                    if price != instance.price and instance.stripe_price_id:
+                        # Archive old price
+                        stripe.Price.modify(instance.stripe_price_id, active=False)
+                        
+                    # Create new price
+                    stripe_price = stripe.Price.create(
+                        product=plan_data.get('stripe_product_id', instance.stripe_product_id),
+                        unit_amount=int(float(price) * 100),
+                        currency='usd',
+                        recurring={'interval': 'month'},
+                        metadata={'plan_name': plan_data.get('name', instance.name)}
+                    )
+                    plan_data['stripe_price_id'] = stripe_price.id
+                except stripe.error.StripeError as e:
+                    logger.error(f"Stripe error updating plan: {str(e)}")
+                    return error_response(f"Failed to update Stripe product/price: {str(e)}", status.HTTP_400_BAD_REQUEST)
+            
+            # If this plan is marked as recommended, unmark other recommended plans
+            if plan_data.get('is_recommended', False) and not instance.is_recommended:
+                SubscriptionPlan.objects.filter(is_recommended=True).exclude(id=instance.id).update(is_recommended=False)
+            
+            serializer.save()
+            return success_response("Subscription plan updated successfully.", serializer.data)
+        except Exception as e:
+            logger.error(f"Error updating subscription plan: {str(e)}", exc_info=True)
+            return error_response(f"Failed to update plan: {str(e)}", status.HTTP_500_INTERNAL_SERVER_ERROR)
+    
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update subscription plan"""
+        return self.update(request, *args, **kwargs)
+    
+    def destroy(self, request, *args, **kwargs):
+        """Delete subscription plan (soft delete by setting is_active=False)"""
+        try:
+            instance = self.get_object()
+            
+            # Check if plan has active subscriptions with remaining posts
+            active_subscriptions = UserSubscription.objects.filter(
+                plan=instance,
+                status='active'
+            ).select_related('plan')
+            
+            # Check each subscription to see if user has remaining posts
+            subscriptions_with_remaining_posts = []
+            for subscription in active_subscriptions:
+                remaining_posts = subscription.get_remaining_posts()
+                # If unlimited (remaining_posts == -1) or has remaining posts > 0
+                if remaining_posts == -1 or remaining_posts > 0:
+                    subscriptions_with_remaining_posts.append(subscription)
+            
+            if subscriptions_with_remaining_posts:
+                count = len(subscriptions_with_remaining_posts)
+                return error_response(
+                    f"Cannot delete plan. {count} user(s) have active subscriptions with remaining posts. "
+                    f"Please wait until all users have exhausted their limits or cancel their subscriptions first.",
+                    status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Also check if there are any active subscriptions (even without remaining posts)
+            # This prevents deletion if subscription period hasn't ended
+            if active_subscriptions.exists():
+                count = active_subscriptions.count()
+                return error_response(
+                    f"Cannot delete plan. {count} user(s) have active subscriptions. "
+                    f"Please wait until subscription periods end or cancel subscriptions first.",
+                    status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Soft delete by setting is_active=False
+            instance.is_active = False
+            instance.save()
+            
+            return success_response("Subscription plan deactivated successfully.", None, status.HTTP_204_NO_CONTENT)
+        except Exception as e:
+            logger.error(f"Error deleting subscription plan: {str(e)}", exc_info=True)
+            return error_response(f"Failed to delete plan: {str(e)}", status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 class UserSubscriptionViewSet(viewsets.ModelViewSet):
@@ -77,9 +246,10 @@ class UserSubscriptionViewSet(viewsets.ModelViewSet):
             
             usage_data = {
                 'has_subscription': subscription.plan is not None,
-                'plan_name': subscription.plan.display_name if subscription.plan else 'Free',
+                'plan_name': subscription.plan.name if subscription.plan else 'free',  # Use plan.name (slug) for matching
+                'plan_display_name': subscription.plan.display_name if subscription.plan else 'Free',  # Keep display_name for UI
                 'posts_used': subscription.posts_used_this_month,
-                'posts_limit': subscription.plan.posts_per_month if subscription.plan else 2,
+                'posts_limit': subscription.plan.posts_per_month if subscription.plan else 1,
                 'remaining_posts': subscription.get_remaining_posts(),
                 'can_post': subscription.can_post() or total_credits > 0,
                 'has_credits': total_credits > 0,
@@ -338,13 +508,23 @@ class UserSubscriptionViewSet(viewsets.ModelViewSet):
                     # Update the existing subscription instead
                     subscription = existing_sub
                 
+                # Check if plan is changing - if so, reset post count
+                plan_changed = subscription.plan != plan
+                if plan_changed:
+                    logger.info(f"Plan changed from {subscription.plan.display_name if subscription.plan else 'None'} to {plan.display_name}. Resetting post count.")
+                    subscription.posts_used_this_month = 0
+                    subscription.last_reset_date = timezone.now()
+                
                 # Set basic fields first (save without timestamps)
                 subscription.plan = plan
                 subscription.status = 'active'
                 subscription.stripe_subscription_id = stripe_subscription.id
                 
                 # Save basic fields first
-                subscription.save(update_fields=['plan', 'status', 'stripe_subscription_id'])
+                if plan_changed:
+                    subscription.save(update_fields=['plan', 'status', 'stripe_subscription_id', 'posts_used_this_month', 'last_reset_date'])
+                else:
+                    subscription.save(update_fields=['plan', 'status', 'stripe_subscription_id'])
                 logger.info(f"Saved basic subscription fields - ID: {subscription.id}")
                 
                 # Now convert and save timestamps separately

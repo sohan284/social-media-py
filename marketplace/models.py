@@ -77,13 +77,14 @@ class SubscriptionPlan(models.Model):
         ('enterprise', 'Enterprise'),
     )
     
-    name = models.CharField(max_length=50, choices=PLAN_TIERS, unique=True)
+    name = models.CharField(max_length=50, unique=True, help_text="Unique identifier for the plan (e.g., 'premium', 'starter')")
     display_name = models.CharField(max_length=100)
     price = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     posts_per_month = models.IntegerField(default=0)  # 0 means unlimited
     stripe_price_id = models.CharField(max_length=255, blank=True, null=True, help_text="Stripe Price ID for subscription")
     stripe_product_id = models.CharField(max_length=255, blank=True, null=True, help_text="Stripe Product ID")
     is_active = models.BooleanField(default=True)
+    is_recommended = models.BooleanField(default=False, help_text="Mark this plan as recommended")
     features = models.JSONField(default=list, help_text="List of features for this plan")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -135,8 +136,8 @@ class UserSubscription(models.Model):
         self.reset_monthly_usage()
         
         if not self.plan:
-            # Free tier - 2 posts per month
-            return self.posts_used_this_month < 2
+            # Free tier - 1 post per month
+            return self.posts_used_this_month < 1
         
         if self.plan.posts_per_month == 0:
             # Unlimited plan
@@ -149,7 +150,7 @@ class UserSubscription(models.Model):
         self.reset_monthly_usage()
         
         if not self.plan:
-            return max(0, 2 - self.posts_used_this_month)
+            return max(0, 1 - self.posts_used_this_month)
         
         if self.plan.posts_per_month == 0:
             return -1  # Unlimited

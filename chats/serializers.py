@@ -1,5 +1,5 @@
 from rest_framework import serializers 
-from .models import Room, Message, BlockedUser, UserReport
+from .models import Room, Message, BlockedUser, UserReport, MessageRequest, AcceptedMessage
 from accounts.serializers import UserSerializer
 
 """ Serializers for Chat """
@@ -98,5 +98,31 @@ class CreateUserReportSerializer(serializers.ModelSerializer):
         if request and request.user == value:
             raise serializers.ValidationError("You cannot report yourself.")
         return value
+
+
+class MessageRequestSerializer(serializers.ModelSerializer):
+    """Serializer for MessageRequest model"""
+    sender = UserSerializer(read_only=True)
+    sender_id = serializers.IntegerField(source='sender.id', read_only=True)
+    sender_username = serializers.CharField(source='sender.username', read_only=True)
+    receiver = UserSerializer(read_only=True)
+    receiver_id = serializers.IntegerField(source='receiver.id', read_only=True)
+    
+    class Meta:
+        model = MessageRequest
+        fields = ['id', 'sender', 'sender_id', 'sender_username', 'receiver', 'receiver_id', 'content', 'status', 'created_at', 'updated_at']
+        read_only_fields = ['sender', 'receiver', 'status', 'created_at', 'updated_at']
+
+
+class AcceptedMessageSerializer(serializers.ModelSerializer):
+    """Serializer for AcceptedMessage model"""
+    user1 = UserSerializer(read_only=True)
+    user2 = UserSerializer(read_only=True)
+    accepted_by = UserSerializer(read_only=True)
+    
+    class Meta:
+        model = AcceptedMessage
+        fields = ['id', 'user1', 'user2', 'accepted_by', 'accepted_at']
+        read_only_fields = ['accepted_at']
 
 """ End of Serializers for Chat """

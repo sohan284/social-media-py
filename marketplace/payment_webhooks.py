@@ -219,6 +219,13 @@ def handle_subscription_created(subscription):
             logger.error("No user found for subscription")
             return
     
+    # Check if plan is changing - if so, reset post count
+    plan_changed = user_subscription.plan != plan
+    if plan_changed:
+        logger.info(f"Plan changed from {user_subscription.plan.display_name if user_subscription.plan else 'None'} to {plan.display_name}. Resetting post count.")
+        user_subscription.posts_used_this_month = 0
+        user_subscription.last_reset_date = timezone.now()
+    
     # Update subscription
     user_subscription.plan = plan
     user_subscription.status = 'active'

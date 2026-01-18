@@ -142,6 +142,34 @@ class DirectMessageConsumer(AsyncWebsocketConsumer):
             'type': 'message',
             'message': event['message']
         }))
+    
+    async def message_request(self, event):
+        """Send message request notification to WebSocket"""
+        await self.send(text_data=json.dumps({
+            'type': 'message_request',
+            'request': event['request']
+        }))
+    
+    async def message_request_accepted(self, event):
+        """Notify sender that message request was accepted"""
+        await self.send(text_data=json.dumps({
+            'type': 'message_request_accepted',
+            'request': event['request']
+        }))
+    
+    async def message_request_rejected(self, event):
+        """Notify sender that message request was rejected"""
+        await self.send(text_data=json.dumps({
+            'type': 'message_request_rejected',
+            'request': event['request']
+        }))
+    
+    async def message_request_cancelled(self, event):
+        """Notify receiver that message request was cancelled"""
+        await self.send(text_data=json.dumps({
+            'type': 'message_request_cancelled',
+            'request': event['request']
+        }))
 
 
 """ Room-based Chat Consumer (for group chats) """

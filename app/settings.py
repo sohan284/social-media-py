@@ -98,12 +98,14 @@ LOGGING = {
     },
 }
 
+# Email Configuration
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
-EMAIL_HOST = 'smtp.gmail.com'
-EMAIL_PORT = 587
-EMAIL_USE_TLS = True
-EMAIL_HOST_USER = 'riyad.cse27@gmail.com'
-EMAIL_HOST_PASSWORD = 'qfwftukbgotbatnu'
+EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com')
+EMAIL_PORT = config('EMAIL_PORT', default=587, cast=int)
+EMAIL_USE_TLS = config('EMAIL_USE_TLS', default=True, cast=bool)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='sr.sohan088@gmail.com')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='dkhzrciqnubshqsy')
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER)
 
 AUTH_USER_MODEL = 'accounts.User'
 
@@ -285,6 +287,6 @@ STRIPE_WEBHOOK_SECRET = config('STRIPE_WEBHOOK_SECRET', default='')
 
 # Payment Settings
 PAY_PER_POST_PRICE = 2.99  # USD
-FREE_TIER_POSTS = 2  # Free tier posts per month
+FREE_TIER_POSTS = 1  # Free tier posts per month
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

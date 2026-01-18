@@ -3,12 +3,13 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.db.models import Q, Max, Count
+from django.db import models
 from django.contrib.auth import get_user_model
 from django.utils import timezone
-from .models import Room, Message, BlockedUser, UserReport
+from .models import Room, Message, BlockedUser, UserReport, MessageRequest, AcceptedMessage
 from .serializers import (
     RoomSerializer, MessageSerializer, BlockedUserSerializer, 
-    UserReportSerializer, CreateUserReportSerializer
+    UserReportSerializer, CreateUserReportSerializer, MessageRequestSerializer
 )
 from accounts.serializers import UserSerializer
 from accounts.permissions import IsAdmin
@@ -556,6 +557,10 @@ class ChatUserSearchView(APIView):
 
 
 """ Direct Messaging Views """
+import logging
+
+logger = logging.getLogger(__name__)
+
 class SendDirectMessageView(APIView):
     """Send a direct message to a user"""
     permission_classes = [permissions.IsAuthenticated]
@@ -603,58 +608,169 @@ class SendDirectMessageView(APIView):
                 "error": "This user has blocked you"
             }, status=status.HTTP_403_FORBIDDEN)
         
-        # Create direct message
-        message = Message.objects.create(
-            sender=request.user,
-            receiver=receiver,
-            content=content
-        )
+        # Check if users have previously messaged each other or if request was accepted
+        try:
+            # Check if they can message each other (have accepted each other or have previous messages)
+            can_message = AcceptedMessage.can_message(request.user, receiver)
+            
+            # Also check if they have previous messages (existing conversation)
+            has_previous_messages = Message.objects.filter(
+                (Q(sender=request.user, receiver=receiver) | 
+                 Q(sender=receiver, receiver=request.user))
+            ).exists()
+            
+            logger.info(f"Message check - User {request.user.id} to {receiver.id}: can_message={can_message}, has_previous_messages={has_previous_messages}")
+        except Exception as e:
+            logger.error(f"Error checking message permissions: {str(e)}", exc_info=True)
+            # Default to allowing message if check fails (fallback behavior)
+            can_message = False
+            has_previous_messages = False
+        
+        # If they can't message and haven't messaged before, create a message request
+        if not can_message and not has_previous_messages:
+            # Check if there's already a pending request
+            existing_request = MessageRequest.objects.filter(
+                sender=request.user,
+                receiver=receiver,
+                status='pending'
+            ).first()
+            
+            if existing_request:
+                return Response({
+                    "success": False,
+                    "error": "You have already sent a message request to this user. Please wait for their response.",
+                    "request_id": existing_request.id
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Check if request was previously rejected
+            rejected_request = MessageRequest.objects.filter(
+                sender=request.user,
+                receiver=receiver,
+                status='rejected'
+            ).exists()
+            
+            if rejected_request:
+                return Response({
+                    "success": False,
+                    "error": "This user has rejected your message request. You cannot send messages to them."
+                }, status=status.HTTP_403_FORBIDDEN)
+            
+            # Create message request
+            message_request = MessageRequest.objects.create(
+                sender=request.user,
+                receiver=receiver,
+                content=content,
+                status='pending'
+            )
+            
+            # Broadcast message request notification via WebSocket
+            from channels.layers import get_channel_layer
+            from asgiref.sync import async_to_sync
+            
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                async_to_sync(channel_layer.group_send)(
+                    f'user_{receiver.id}',
+                    {
+                        'type': 'message_request',
+                        'request': {
+                            'id': message_request.id,
+                            'sender_id': request.user.id,
+                            'sender_username': request.user.username,
+                            'content': message_request.content,
+                            'status': message_request.status,
+                            'created_at': message_request.created_at.isoformat(),
+                        }
+                    }
+                )
+            
+            return Response({
+                "success": True,
+                "message": "Message request sent. The user will be notified and can accept or reject your request.",
+                "data": {
+                    "request_id": message_request.id,
+                    "status": "pending",
+                    "is_request": True
+                }
+            }, status=status.HTTP_201_CREATED)
+        
+        # Create direct message (users can message each other)
+        try:
+            message = Message.objects.create(
+                sender=request.user,
+                receiver=receiver,
+                content=content
+            )
+        except Exception as e:
+            logger.error(f"Error creating message: {str(e)}", exc_info=True)
+            return Response({
+                "success": False,
+                "error": "Failed to send message. Please try again."
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
         # Broadcast via WebSocket to both sender and receiver
-        from channels.layers import get_channel_layer
-        from asgiref.sync import async_to_sync
-        
-        channel_layer = get_channel_layer()
-        if channel_layer:
-            # Send to receiver's personal channel
-            async_to_sync(channel_layer.group_send)(
-                f'user_{receiver.id}',
-                {
-                    'type': 'direct_message',
-                    'message': {
-                        'id': message.id,
-                        'content': message.content,
-                        'sender_id': request.user.id,
-                        'sender_username': request.user.username,
-                        'receiver_id': receiver.id,
-                        'created_at': message.created_at.isoformat(),
-                        'is_read': message.is_read,
+        try:
+            from channels.layers import get_channel_layer
+            from asgiref.sync import async_to_sync
+            
+            channel_layer = get_channel_layer()
+            if channel_layer:
+                # Send to receiver's personal channel
+                async_to_sync(channel_layer.group_send)(
+                    f'user_{receiver.id}',
+                    {
+                        'type': 'direct_message',
+                        'message': {
+                            'id': message.id,
+                            'content': message.content,
+                            'sender_id': request.user.id,
+                            'sender_username': request.user.username,
+                            'receiver_id': receiver.id,
+                            'created_at': message.created_at.isoformat(),
+                            'is_read': message.is_read,
+                        }
                     }
-                }
-            )
-            # Also send to sender's channel for confirmation
-            async_to_sync(channel_layer.group_send)(
-                f'user_{request.user.id}',
-                {
-                    'type': 'direct_message',
-                    'message': {
-                        'id': message.id,
-                        'content': message.content,
-                        'sender_id': request.user.id,
-                        'sender_username': request.user.username,
-                        'receiver_id': receiver.id,
-                        'created_at': message.created_at.isoformat(),
-                        'is_read': message.is_read,
+                )
+                # Also send to sender's channel for confirmation
+                async_to_sync(channel_layer.group_send)(
+                    f'user_{request.user.id}',
+                    {
+                        'type': 'direct_message',
+                        'message': {
+                            'id': message.id,
+                            'content': message.content,
+                            'sender_id': request.user.id,
+                            'sender_username': request.user.username,
+                            'receiver_id': receiver.id,
+                            'created_at': message.created_at.isoformat(),
+                            'is_read': message.is_read,
+                        }
                     }
-                }
-            )
+                )
+        except Exception as e:
+            logger.error(f"Error broadcasting message via WebSocket: {str(e)}", exc_info=True)
+            # Continue even if WebSocket fails - message is already created
         
-        serializer = MessageSerializer(message, context={'request': request})
-        return Response({
-            "success": True,
-            "message": "Message sent successfully",
-            "data": serializer.data
-        }, status=status.HTTP_201_CREATED)
+        try:
+            serializer = MessageSerializer(message, context={'request': request})
+            return Response({
+                "success": True,
+                "message": "Message sent successfully",
+                "data": serializer.data
+            }, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            logger.error(f"Error serializing message: {str(e)}", exc_info=True)
+            return Response({
+                "success": True,
+                "message": "Message sent successfully",
+                "data": {
+                    "id": message.id,
+                    "content": message.content,
+                    "sender_id": request.user.id,
+                    "receiver_id": receiver.id,
+                    "created_at": message.created_at.isoformat() if hasattr(message, 'created_at') else None,
+                }
+            }, status=status.HTTP_201_CREATED)
 
 
 class UpdateDirectMessageView(APIView):
@@ -786,6 +902,222 @@ class DeleteDirectMessageView(APIView):
         return Response({
             "success": True,
             "message": "Message deleted successfully"
+            }, status=status.HTTP_200_OK)
+
+
+class GetMessageRequestsView(APIView):
+    """Get pending message requests for the current user"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        pending_requests = MessageRequest.objects.filter(
+            receiver=request.user,
+            status='pending'
+        ).select_related('sender', 'receiver').order_by('-created_at')
+        
+        serializer = MessageRequestSerializer(pending_requests, many=True, context={'request': request})
+        return Response({
+            "success": True,
+            "data": serializer.data
+        }, status=status.HTTP_200_OK)
+
+
+class AcceptMessageRequestView(APIView):
+    """Accept a message request"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        request_id = request.data.get('request_id')
+        
+        if not request_id:
+            return Response({
+                "success": False,
+                "error": "request_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message_request = MessageRequest.objects.get(
+                id=request_id,
+                receiver=request.user,
+                status='pending'
+            )
+        except MessageRequest.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Message request not found or already processed"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Update request status to accepted
+        message_request.status = 'accepted'
+        message_request.save()
+        
+        # Create accepted message relationship (bidirectional)
+        AcceptedMessage.objects.get_or_create(
+            user1=message_request.sender,
+            user2=message_request.receiver,
+            defaults={'accepted_by': request.user}
+        )
+        
+        # Create the actual message from the request content
+        message = Message.objects.create(
+            sender=message_request.sender,
+            receiver=message_request.receiver,
+            content=message_request.content
+        )
+        
+        # Broadcast acceptance via WebSocket
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            # Notify sender that request was accepted
+            async_to_sync(channel_layer.group_send)(
+                f'user_{message_request.sender.id}',
+                {
+                    'type': 'message_request_accepted',
+                    'request': {
+                        'id': message_request.id,
+                        'receiver_id': request.user.id,
+                        'receiver_username': request.user.username,
+                        'message_id': message.id,
+                    }
+                }
+            )
+            # Send the message to receiver
+            async_to_sync(channel_layer.group_send)(
+                f'user_{request.user.id}',
+                {
+                    'type': 'direct_message',
+                    'message': {
+                        'id': message.id,
+                        'content': message.content,
+                        'sender_id': message_request.sender.id,
+                        'sender_username': message_request.sender.username,
+                        'receiver_id': request.user.id,
+                        'created_at': message.created_at.isoformat(),
+                        'is_read': message.is_read,
+                    }
+                }
+            )
+        
+        message_serializer = MessageSerializer(message, context={'request': request})
+        return Response({
+            "success": True,
+            "message": "Message request accepted. You can now message each other.",
+            "data": {
+                "request": MessageRequestSerializer(message_request, context={'request': request}).data,
+                "message": message_serializer.data
+            }
+        }, status=status.HTTP_200_OK)
+
+
+class RejectMessageRequestView(APIView):
+    """Reject a message request"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        request_id = request.data.get('request_id')
+        
+        if not request_id:
+            return Response({
+                "success": False,
+                "error": "request_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message_request = MessageRequest.objects.get(
+                id=request_id,
+                receiver=request.user,
+                status='pending'
+            )
+        except MessageRequest.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Message request not found or already processed"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Update request status to rejected
+        message_request.status = 'rejected'
+        message_request.save()
+        
+        # Broadcast rejection via WebSocket
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            # Notify sender that request was rejected
+            async_to_sync(channel_layer.group_send)(
+                f'user_{message_request.sender.id}',
+                {
+                    'type': 'message_request_rejected',
+                    'request': {
+                        'id': message_request.id,
+                        'receiver_id': request.user.id,
+                        'receiver_username': request.user.username,
+                    }
+                }
+            )
+        
+        return Response({
+            "success": True,
+            "message": "Message request rejected. The user cannot send you messages.",
+            "data": MessageRequestSerializer(message_request, context={'request': request}).data
+        }, status=status.HTTP_200_OK)
+
+
+class CancelMessageRequestView(APIView):
+    """Cancel a message request (only sender can cancel)"""
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def delete(self, request):
+        request_id = request.query_params.get('request_id') or request.data.get('request_id')
+        
+        if not request_id:
+            return Response({
+                "success": False,
+                "error": "request_id is required"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            message_request = MessageRequest.objects.get(
+                id=request_id,
+                sender=request.user,
+                status='pending'
+            )
+        except MessageRequest.DoesNotExist:
+            return Response({
+                "success": False,
+                "error": "Message request not found or already processed"
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        receiver_id = message_request.receiver.id
+        message_request_id = message_request.id
+        message_request.delete()
+        
+        # Broadcast cancellation via WebSocket
+        from channels.layers import get_channel_layer
+        from asgiref.sync import async_to_sync
+        
+        channel_layer = get_channel_layer()
+        if channel_layer:
+            # Notify receiver that request was cancelled
+            async_to_sync(channel_layer.group_send)(
+                f'user_{receiver_id}',
+                {
+                    'type': 'message_request_cancelled',
+                    'request': {
+                        'id': message_request_id,
+                        'sender_id': request.user.id,
+                        'sender_username': request.user.username,
+                    }
+                }
+            )
+        
+        return Response({
+            "success": True,
+            "message": "Message request cancelled successfully."
         }, status=status.HTTP_200_OK)
 
 
@@ -832,7 +1164,20 @@ class GetConversationView(APIView):
         # Include user info with last_seen and block status
         user_serializer = UserSerializer(other_user, context={'request': request})
         
-        return Response({
+        # Check for pending message requests
+        pending_request_received = MessageRequest.objects.filter(
+            sender=other_user,
+            receiver=request.user,
+            status='pending'
+        ).select_related('sender', 'receiver').order_by('-created_at').first()
+        
+        pending_request_sent = MessageRequest.objects.filter(
+            sender=request.user,
+            receiver=other_user,
+            status='pending'
+        ).select_related('sender', 'receiver').order_by('-created_at').first()
+        
+        response_data = {
             "success": True,
             "data": serializer.data,
             "user": user_serializer.data,  # Include user info with online status and last_seen
@@ -840,7 +1185,22 @@ class GetConversationView(APIView):
                 "i_blocked_them": i_blocked_them,
                 "they_blocked_me": they_blocked_me,
             }
-        })
+        }
+        
+        # Add message request info if exists
+        if pending_request_received:
+            response_data["pending_request"] = MessageRequestSerializer(pending_request_received, context={'request': request}).data
+            response_data["has_pending_request"] = True
+            response_data["is_request_receiver"] = True
+        elif pending_request_sent:
+            response_data["pending_request"] = MessageRequestSerializer(pending_request_sent, context={'request': request}).data
+            response_data["has_pending_request"] = True
+            response_data["is_request_receiver"] = False
+        else:
+            response_data["has_pending_request"] = False
+            response_data["is_request_receiver"] = False
+        
+        return Response(response_data)
 
 
 class GetConversationsListView(APIView):
@@ -856,8 +1216,20 @@ class GetConversationsListView(APIView):
         sent_to = Message.objects.filter(sender=request.user).values_list('receiver_id', flat=True).distinct()
         received_from = Message.objects.filter(receiver=request.user).values_list('sender_id', flat=True).distinct()
         
+        # Get users with pending message requests (where current user is receiver)
+        pending_request_senders = MessageRequest.objects.filter(
+            receiver=request.user,
+            status='pending'
+        ).values_list('sender_id', flat=True).distinct()
+        
+        # Get users where current user sent a pending request
+        sent_request_receivers = MessageRequest.objects.filter(
+            sender=request.user,
+            status='pending'
+        ).values_list('receiver_id', flat=True).distinct()
+        
         # Combine and get unique user IDs (include blocked users so they appear in list)
-        user_ids = set(list(sent_to) + list(received_from))
+        user_ids = set(list(sent_to) + list(received_from) + list(pending_request_senders) + list(sent_request_receivers))
         
         # Get the latest message for each conversation
         conversations = []
@@ -875,22 +1247,59 @@ class GetConversationsListView(APIView):
                     is_read=False
                 ).count()
                 
+                # Check for pending message requests
+                pending_request_received = MessageRequest.objects.filter(
+                    sender=other_user,
+                    receiver=request.user,
+                    status='pending'
+                ).select_related('sender', 'receiver').order_by('-created_at').first()
+                
+                pending_request_sent = MessageRequest.objects.filter(
+                    sender=request.user,
+                    receiver=other_user,
+                    status='pending'
+                ).select_related('sender', 'receiver').order_by('-created_at').first()
+                
                 # Check block status
                 i_blocked_them = BlockedUser.objects.filter(blocker=request.user, blocked=other_user).exists()
                 they_blocked_me = BlockedUser.objects.filter(blocker=other_user, blocked=request.user).exists()
                 
-                conversations.append({
+                # Determine last activity time (message or request)
+                last_activity_time = None
+                if last_message:
+                    last_activity_time = last_message.created_at.isoformat()
+                elif pending_request_received:
+                    last_activity_time = pending_request_received.created_at.isoformat()
+                elif pending_request_sent:
+                    last_activity_time = pending_request_sent.created_at.isoformat()
+                
+                conversation_data = {
                     'user': UserSerializer(other_user, context={'request': request}).data,
                     'last_message': MessageSerializer(last_message, context={'request': request}).data if last_message else None,
                     'unread_count': unread_count,
-                    'last_message_time': last_message.created_at.isoformat() if last_message else None,
+                    'last_message_time': last_activity_time,
                     'i_blocked_them': i_blocked_them,
                     'they_blocked_me': they_blocked_me,
-                })
+                }
+                
+                # Add message request data if exists
+                if pending_request_received:
+                    conversation_data['pending_request'] = MessageRequestSerializer(pending_request_received, context={'request': request}).data
+                    conversation_data['has_pending_request'] = True
+                    conversation_data['is_request_receiver'] = True
+                elif pending_request_sent:
+                    conversation_data['pending_request'] = MessageRequestSerializer(pending_request_sent, context={'request': request}).data
+                    conversation_data['has_pending_request'] = True
+                    conversation_data['is_request_receiver'] = False
+                else:
+                    conversation_data['has_pending_request'] = False
+                    conversation_data['is_request_receiver'] = False
+                
+                conversations.append(conversation_data)
             except User.DoesNotExist:
                 continue
         
-        # Sort by last message time (most recent first)
+        # Sort by last activity time (most recent first)
         conversations.sort(key=lambda x: x['last_message_time'] or '', reverse=True)
         
         return Response({
