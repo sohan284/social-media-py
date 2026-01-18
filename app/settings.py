@@ -1,6 +1,7 @@
 from pathlib import Path
 import os
 from datetime import timedelta
+from decouple import config
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -277,5 +278,13 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 
 CKEDITOR_UPLOAD_PATH = "uploads/"
 
+# Stripe Configuration
+STRIPE_SECRET_KEY = config('STRIPE_SECRET_KEY', default='')
+STRIPE_PUBLISHABLE_KEY = config('STRIPE_PUBLISHABLE_KEY', default='')
+STRIPE_WEBHOOK_SECRET = config('STRIPE_WEBHOOK_SECRET', default='')
+
+# Payment Settings
+PAY_PER_POST_PRICE = 2.99  # USD
+FREE_TIER_POSTS = 2  # Free tier posts per month
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'

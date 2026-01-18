@@ -35,7 +35,7 @@ from .utils import *
 import logging
 from interest.models import *
 from django.db import transaction
-from marketplace.models import Product
+from marketplace.models import Product, UserSubscription, Payment
 from django.db.models import Sum, Avg, Max, Min
 
 User = get_user_model()
@@ -1198,6 +1198,161 @@ class ServiceAnalyticsView(APIView):
             return Response({
                 "success": False,
                 "message": "Error retrieving service analytics",
+                "error": str(e)
+            }, status=500)
+
+
+class SubscriptionAnalyticsView(APIView):
+    """Get filtered subscription analytics based on date range"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        try:
+            from datetime import datetime
+            
+            # Get date range parameters
+            start_date_str = request.query_params.get('start_date')
+            end_date_str = request.query_params.get('end_date')
+            
+            now = timezone.now()
+            
+            # Parse dates or use defaults
+            if start_date_str:
+                try:
+                    start_date = timezone.make_aware(datetime.strptime(start_date_str, '%Y-%m-%d'))
+                except ValueError:
+                    start_date = now - timedelta(days=30)
+            else:
+                start_date = now - timedelta(days=30)
+            
+            if end_date_str:
+                try:
+                    end_date = timezone.make_aware(datetime.strptime(end_date_str, '%Y-%m-%d'))
+                    # Include the full end date
+                    end_date = end_date.replace(hour=23, minute=59, second=59)
+                except ValueError:
+                    end_date = now
+            else:
+                end_date = now
+            
+            # Ensure start_date is before end_date
+            if start_date > end_date:
+                start_date, end_date = end_date, start_date
+            
+            # Calculate number of days
+            days_diff = (end_date - start_date).days + 1
+            
+            # Limit to reasonable range (max 2 years)
+            if days_diff > 730:
+                days_diff = 730
+                start_date = end_date - timedelta(days=729)
+            
+            # Generate daily subscription analytics data
+            subscription_analytics = []
+            
+            for i in range(days_diff):
+                day_start = start_date + timedelta(days=i)
+                day_end = day_start + timedelta(days=1)
+                
+                # Subscription analytics - new subscriptions created per day
+                new_subscriptions = UserSubscription.objects.filter(
+                    created_at__gte=day_start,
+                    created_at__lt=day_end
+                ).count()
+                
+                subscription_analytics.append({
+                    'date': day_start.strftime('%Y-%m-%d'),
+                    'new': new_subscriptions,
+                })
+            
+            return Response({
+                "success": True,
+                "message": "Subscription analytics retrieved successfully",
+                "data": {
+                    "subscription_analytics": subscription_analytics,
+                    "date_range": {
+                        "start_date": start_date.strftime('%Y-%m-%d'),
+                        "end_date": end_date.strftime('%Y-%m-%d'),
+                        "days": days_diff,
+                    }
+                }
+            }, status=200)
+        except Exception as e:
+            logger.error(f"Error in SubscriptionAnalyticsView: {str(e)}", exc_info=True)
+            return Response({
+                "success": False,
+                "message": "Error retrieving subscription analytics",
+                "error": str(e)
+            }, status=500)
+
+
+class AdminPaymentListView(APIView):
+    """Get all payments for admin panel"""
+    permission_classes = [permissions.IsAuthenticated, IsAdmin]
+
+    def get(self, request):
+        try:
+            from marketplace.payment_serializers import PaymentSerializer
+            
+            # Get query parameters
+            status_filter = request.query_params.get('status')
+            payment_type = request.query_params.get('payment_type')
+            user_id = request.query_params.get('user_id')
+            page = int(request.query_params.get('page', 1))
+            page_size = int(request.query_params.get('page_size', 20))
+            
+            # Build queryset
+            queryset = Payment.objects.select_related('user', 'subscription', 'subscription__plan').all()
+            
+            # Apply filters
+            if status_filter:
+                queryset = queryset.filter(status=status_filter)
+            if payment_type:
+                queryset = queryset.filter(payment_type=payment_type)
+            if user_id:
+                queryset = queryset.filter(user_id=user_id)
+            
+            # Order by created_at descending
+            queryset = queryset.order_by('-created_at')
+            
+            # Pagination
+            total_count = queryset.count()
+            start = (page - 1) * page_size
+            end = start + page_size
+            paginated_queryset = queryset[start:end]
+            
+            # Serialize data
+            serializer = PaymentSerializer(paginated_queryset, many=True)
+            
+            # Calculate summary stats
+            total_revenue = Payment.objects.filter(status='succeeded').aggregate(
+                total=Sum('amount')
+            )['total'] or 0
+            
+            total_payments = Payment.objects.filter(status='succeeded').count()
+            
+            return Response({
+                "success": True,
+                "message": "Payments retrieved successfully",
+                "data": {
+                    "payments": serializer.data,
+                    "pagination": {
+                        "page": page,
+                        "page_size": page_size,
+                        "total_count": total_count,
+                        "total_pages": (total_count + page_size - 1) // page_size,
+                    },
+                    "summary": {
+                        "total_revenue": float(total_revenue),
+                        "total_payments": total_payments,
+                    }
+                }
+            }, status=200)
+        except Exception as e:
+            logger.error(f"Error in AdminPaymentListView: {str(e)}", exc_info=True)
+            return Response({
+                "success": False,
+                "message": "Error retrieving payments",
                 "error": str(e)
             }, status=500)
 
