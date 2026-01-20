@@ -1,5 +1,11 @@
 # payment_webhooks.py
-import stripe
+try:
+    import stripe
+    STRIPE_AVAILABLE = True
+except ImportError:
+    stripe = None
+    STRIPE_AVAILABLE = False
+    
 import logging
 from datetime import datetime
 from django.conf import settings
@@ -14,14 +20,21 @@ from django.contrib.auth import get_user_model
 User = get_user_model()
 logger = logging.getLogger(__name__)
 
-stripe.api_key = settings.STRIPE_SECRET_KEY
-webhook_secret = settings.STRIPE_WEBHOOK_SECRET
+if STRIPE_AVAILABLE:
+    stripe.api_key = getattr(settings, 'STRIPE_SECRET_KEY', None)
+    webhook_secret = getattr(settings, 'STRIPE_WEBHOOK_SECRET', None)
+else:
+    webhook_secret = None
 
 
 @csrf_exempt
 @require_POST
 def stripe_webhook(request):
     """Handle Stripe webhook events"""
+    if not STRIPE_AVAILABLE:
+        logger.error("Stripe is not available")
+        return HttpResponse("Stripe not available", status=503)
+        
     payload = request.body
     sig_header = request.META.get('HTTP_STRIPE_SIGNATURE')
     

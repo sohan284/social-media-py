@@ -1,5 +1,11 @@
 # payment_views.py
-import stripe
+try:
+    import stripe
+    STRIPE_AVAILABLE = True
+except ImportError:
+    stripe = None
+    STRIPE_AVAILABLE = False
+    
 import logging
 from django.conf import settings
 from django.utils import timezone
@@ -23,7 +29,10 @@ from .views import success_response, error_response
 logger = logging.getLogger(__name__)
 
 # Initialize Stripe
-stripe.api_key = settings.STRIPE_SECRET_KEY
+if STRIPE_AVAILABLE:
+    stripe.api_key = getattr(settings, 'STRIPE_SECRET_KEY', None)
+    if not stripe.api_key:
+        logger.warning("Stripe secret key not found in settings")
 
 
 class SubscriptionPlanViewSet(viewsets.ModelViewSet):

@@ -26,17 +26,22 @@ router.register(r'marketplace/categories', MarketplaceCategoryViewSet, basename=
 router.register(r'marketplace/subcategories', MarketplaceSubCategoryViewSet, basename="marketplace-subcategory")
 router.register(r'marketplace/items', MarketplaceProductViewSet, basename="marketplace-item")
 
-# Payment/Subscription endpoints
-from marketplace.payment_views import (
-    SubscriptionPlanViewSet,
-    UserSubscriptionViewSet,
-    PaymentViewSet,
-    PostCreditViewSet
-)
-router.register(r'marketplace/subscription-plans', SubscriptionPlanViewSet, basename="subscription-plan")
-router.register(r'marketplace/subscription', UserSubscriptionViewSet, basename="user-subscription")
-router.register(r'marketplace/payments', PaymentViewSet, basename="payment")
-router.register(r'marketplace/credits', PostCreditViewSet, basename="post-credit")
+""" Payment/Subscription endpoints """
+try:
+    from marketplace.payment_views import (
+        SubscriptionPlanViewSet,
+        UserSubscriptionViewSet,
+        PaymentViewSet,
+        PostCreditViewSet
+    )
+    router.register(r'marketplace/subscription-plans', SubscriptionPlanViewSet, basename="subscription-plan")
+    router.register(r'marketplace/subscription', UserSubscriptionViewSet, basename="user-subscription")
+    router.register(r'marketplace/payments', PaymentViewSet, basename="payment")
+    router.register(r'marketplace/credits', PostCreditViewSet, basename="post-credit")
+    PAYMENT_ENABLED = True
+except (ImportError, Exception):
+    # Log error if needed, but allow app to start without payment features
+    PAYMENT_ENABLED = False
 
 """ Community Section """
 router.register(r'communities', CommunityViewSet, basename='community')
@@ -77,8 +82,10 @@ urlpatterns = [
     path('chat/admin/conversation/delete/', AdminDeleteConversationView.as_view(), name='admin-delete-conversation'),
     # Unified reports endpoint (must import UnifiedReportsView from post.views)
     path('reports/all/', UnifiedReportsView.as_view(), name='unified-reports'),
-    # Stripe webhook endpoint
-    path('marketplace/', include('marketplace.payment_urls')),
     # Router URLs (must be last to avoid conflicts with specific paths)
     path("", include(router.urls)),
 ]
+
+# Add payment URLs if enabled
+if PAYMENT_ENABLED:
+    urlpatterns.insert(-1, path('marketplace/', include('marketplace.payment_urls')))

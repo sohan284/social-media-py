@@ -76,6 +76,51 @@ class PostViewSet(viewsets.ModelViewSet):
         content = serializer.validated_data.get('content', '')
         media_files = serializer.validated_data.get('media_files', [])
         
+        # Check if post has media files (media_files list is not empty)
+        # This is the primary indicator - if media_files are uploaded, it's a media post
+        has_media = bool(media_files)
+        
+        # Also check post_type - if explicitly set to 'media', it's a media post
+        post_type = serializer.validated_data.get('post_type', '')
+        if not has_media and post_type == 'media':
+            # Check if media_file field is being set directly
+            has_media = bool(serializer.validated_data.get('media_file'))
+        
+        # DAILY MEDIA POST LIMIT: Only restrict if post has media files
+        if has_media:
+            # Get today's date range (start and end of day in UTC)
+            today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_end = today_start + timedelta(days=1)
+            
+            # Count media posts created today by this user (excluding drafts)
+            # Count posts where post_type='media' OR media_file is not null
+            # We'll filter out empty arrays in a second pass if needed
+            media_posts_query = Post.objects.filter(
+                user=self.request.user,
+                created_at__gte=today_start,
+                created_at__lt=today_end,
+                status__in=['approved', 'pending', 'rejected']  # Exclude drafts
+            ).filter(
+                Q(post_type='media') | Q(media_file__isnull=False)
+            )
+            
+            # Count posts, but exclude those with empty media_file arrays
+            media_posts_today = 0
+            for post in media_posts_query:
+                if post.post_type == 'media':
+                    media_posts_today += 1
+                elif post.media_file and isinstance(post.media_file, list) and len(post.media_file) > 0:
+                    media_posts_today += 1
+            
+            # Maximum 3 media posts per day
+            MAX_MEDIA_POSTS_PER_DAY = 3
+            if media_posts_today >= MAX_MEDIA_POSTS_PER_DAY:
+                raise serializers.ValidationError({
+                    "media_limit": f"You have reached your daily limit of {MAX_MEDIA_POSTS_PER_DAY} media posts. "
+                                   f"You can still post unlimited text or link posts. "
+                                   f"Please try again tomorrow or remove media files from this post."
+                })
+        
         # Check content for inappropriate material
         is_approved, rejection_reason = moderate_post(title, content, media_files)
         
