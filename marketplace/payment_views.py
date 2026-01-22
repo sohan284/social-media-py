@@ -63,6 +63,8 @@ class SubscriptionPlanViewSet(viewsets.ModelViewSet):
     
     def create(self, request, *args, **kwargs):
         """Create a new subscription plan with Stripe integration"""
+        if not STRIPE_AVAILABLE:
+            return error_response("Payment gateway is not currently available.", status.HTTP_503_SERVICE_UNAVAILABLE)
         try:
             serializer = self.get_serializer(data=request.data)
             serializer.is_valid(raise_exception=True)
@@ -116,6 +118,8 @@ class SubscriptionPlanViewSet(viewsets.ModelViewSet):
     
     def update(self, request, *args, **kwargs):
         """Update subscription plan with Stripe integration"""
+        if not STRIPE_AVAILABLE:
+            return error_response("Payment gateway is not currently available.", status.HTTP_503_SERVICE_UNAVAILABLE)
         try:
             instance = self.get_object()
             serializer = self.get_serializer(instance, data=request.data, partial=False)
@@ -274,6 +278,8 @@ class UserSubscriptionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def create_checkout_session(self, request):
         """Create Stripe checkout session for subscription"""
+        if not STRIPE_AVAILABLE:
+            return error_response("Payment gateway is not currently available.", status.HTTP_503_SERVICE_UNAVAILABLE)
         plan_id = request.data.get('plan_id')
         if not plan_id:
             return error_response("plan_id is required.")
@@ -337,6 +343,8 @@ class UserSubscriptionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def create_post_payment(self, request):
         """Create Stripe checkout session for one-time post payment"""
+        if not STRIPE_AVAILABLE:
+            return error_response("Payment gateway is not currently available.", status.HTTP_503_SERVICE_UNAVAILABLE)
         from django.conf import settings
         
         try:
@@ -395,6 +403,8 @@ class UserSubscriptionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def cancel_subscription(self, request):
         """Cancel subscription at period end"""
+        if not STRIPE_AVAILABLE:
+            return error_response("Payment gateway is not currently available.", status.HTTP_503_SERVICE_UNAVAILABLE)
         subscription = get_object_or_404(UserSubscription, user=request.user)
         
         if not subscription.stripe_subscription_id:
@@ -418,6 +428,8 @@ class UserSubscriptionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def create_subscription_with_payment_method(self, request):
         """Create subscription using payment method (embedded payment)"""
+        if not STRIPE_AVAILABLE:
+            return error_response("Payment gateway is not currently available.", status.HTTP_503_SERVICE_UNAVAILABLE)
         # Log full request details for debugging
         logger.info(f"Request received - Method: {request.method}, Content-Type: {request.content_type}")
         logger.info(f"Request data: {request.data}")
@@ -662,6 +674,8 @@ class UserSubscriptionViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def create_post_payment_with_payment_method(self, request):
         """Create one-time post payment using payment method (embedded payment)"""
+        if not STRIPE_AVAILABLE:
+            return error_response("Payment gateway is not currently available.", status.HTTP_503_SERVICE_UNAVAILABLE)
         from django.conf import settings
         
         payment_method_id = request.data.get('payment_method_id')

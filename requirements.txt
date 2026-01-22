@@ -17,3 +17,4 @@ requests>=2.31.0
 better-profanity>=0.7.0
 stripe>=7.0.0
 
+python-dotenv>=1.0.0
